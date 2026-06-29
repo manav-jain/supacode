@@ -101,7 +101,7 @@ extension AppFeature.Action {
       switch event {
       case .notificationIndicatorChanged:
         return true
-      case .notificationReceived, .tabCreated, .tabClosed, .focusChanged,
+      case .notificationReceived, .tabCreated, .editorTabCreated, .tabClosed, .focusChanged,
         .taskStatusChanged, .blockingScriptCompleted, .commandPaletteToggleRequested,
         .setupScriptConsumed, .worktreeProjectionChanged, .tabProjectionChanged,
         .tabRemoved, .worktreeStateTornDown, .tabProgressDisplayChanged,
@@ -126,8 +126,7 @@ extension AppFeature.Action {
       .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch,
       .systemNotificationsPermissionFailed, .deeplinkReceived,
-      .deeplink, .deeplinkReferenceOpened, .alert, .deeplinkInputConfirmation,
-      .editor:
+      .deeplink, .deeplinkReferenceOpened, .alert, .deeplinkInputConfirmation:
       return false
     }
   }

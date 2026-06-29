@@ -27,17 +27,32 @@ struct TerminalsFeature {
     /// scope through `\.terminalTabs[id:]` for per-tab observation isolation
     /// during agent storms.
     var terminalTabs: IdentifiedArrayOf<TerminalTabFeature.State> = []
+    /// Per-editor-tab feature instances keyed by `EditorFeature.State.id`, which
+    /// is the tab's `TerminalTabID.rawValue`. The content view scopes through
+    /// `\.editorTabs[id:]` and renders `EditorView` for the selected editor tab.
+    var editorTabs: IdentifiedArrayOf<EditorFeature.State> = []
     /// FIFO of recently-removed tabs scoped by `(worktreeID, tabID)`. Insert
     /// order = removal order; oldest entry is dropped when the cap is hit.
     var recentlyRemovedTabIDs: [RecentlyRemovedTab] = []
+    /// Maps an editor tab's `TerminalTabID` to its owning worktree, so the
+    /// `worktreeStateTornDown` prune path can drop the right editor states (an
+    /// editor tab emits no `WorktreeTabProjection`, so it isn't tracked in
+    /// `terminalTabs`).
+    var editorTabWorktreeIDs: [TerminalTabID: Worktree.ID] = [:]
   }
 
   enum Action {
     case terminalTabs(IdentifiedActionOf<TerminalTabFeature>)
+    /// Per-editor-tab child actions (open / text / save / dirty delegate).
+    case editorTabs(IdentifiedActionOf<EditorFeature>)
     /// Tab projection arrived from `WorktreeTerminalState`. Inserts a new
     /// per-tab state if missing, then forwards to the tab's reducer.
     case tabProjectionChanged(worktreeID: Worktree.ID, projection: WorktreeTabProjection)
-    /// Tab destroyed in the worktree state. Drops the matching feature state.
+    /// An editor tab was created in the worktree state. Spawns the matching
+    /// `EditorFeature.State` (id == tab UUID) and kicks off the file load.
+    case editorTabOpened(worktreeID: Worktree.ID, tabID: TerminalTabID, fileURL: URL?)
+    /// Tab destroyed in the worktree state. Drops the matching feature state
+    /// (terminal or editor).
     case tabRemoved(worktreeID: Worktree.ID, tabID: TerminalTabID)
     /// Worktree's entire terminal state was torn down (prune path). Drops any
     /// orphan `terminalTabs` rows and removed-tab FIFO records for this
@@ -50,6 +65,32 @@ struct TerminalsFeature {
       switch action {
       case .terminalTabs:
         return .none
+
+      case .editorTabs:
+        // Per-editor child actions (binding / load / save) are handled by the
+        // scoped `EditorFeature` via `.forEach`. The dirty delegate is observed
+        // upstream in `AppFeature` (it owns `terminalClient` to flip the tab's
+        // dirty indicator), so nothing terminal-orchestration-level reacts here.
+        return .none
+
+      case .editorTabOpened(let worktreeID, let tabID, let fileURL):
+        if state.editorTabs[id: tabID.rawValue] == nil {
+          // Drop a straggler arriving after the tab was already removed in this
+          // worktree (mirrors `tabProjectionChanged`'s recently-removed guard).
+          guard
+            !state.recentlyRemovedTabIDs.contains(where: {
+              $0.worktreeID == worktreeID && $0.tabID == tabID
+            })
+          else { return .none }
+          state.editorTabs.append(
+            EditorFeature.State(id: tabID.rawValue, fileURL: fileURL)
+          )
+          state.editorTabWorktreeIDs[tabID] = worktreeID
+        }
+        // Kick off the load through the scoped reducer's cancellable effect.
+        // A nil fileURL leaves the editor empty (the worktree "open" entry point).
+        guard let fileURL else { return .none }
+        return .send(.editorTabs(.element(id: tabID.rawValue, action: .open(fileURL))))
 
       case .tabProjectionChanged(let worktreeID, let projection):
         let tabID = projection.tabID
@@ -71,6 +112,8 @@ struct TerminalsFeature {
 
       case .tabRemoved(let worktreeID, let tabID):
         state.terminalTabs.remove(id: tabID)
+        state.editorTabs.remove(id: tabID.rawValue)
+        state.editorTabWorktreeIDs.removeValue(forKey: tabID)
         state.recentlyRemovedTabIDs.append(
           RecentlyRemovedTab(worktreeID: worktreeID, tabID: tabID)
         )
@@ -84,11 +127,21 @@ struct TerminalsFeature {
       case .worktreeStateTornDown(let worktreeID):
         state.recentlyRemovedTabIDs.removeAll { $0.worktreeID == worktreeID }
         state.terminalTabs.removeAll { $0.worktreeID == worktreeID }
+        let removedEditorTabIDs = state.editorTabWorktreeIDs
+          .filter { $0.value == worktreeID }
+          .map(\.key)
+        for tabID in removedEditorTabIDs {
+          state.editorTabs.remove(id: tabID.rawValue)
+          state.editorTabWorktreeIDs.removeValue(forKey: tabID)
+        }
         return .none
       }
     }
     .forEach(\.terminalTabs, action: \.terminalTabs) {
       TerminalTabFeature()
+    }
+    .forEach(\.editorTabs, action: \.editorTabs) {
+      EditorFeature()
     }
   }
 }

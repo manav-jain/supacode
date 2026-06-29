@@ -2096,6 +2096,88 @@ struct WorktreeTerminalManagerTests {
     #expect(statuses == [.running])
   }
 
+  // MARK: - Editor tabs.
+
+  @Test func createEditorTabAddsEditorKindTabAndFiresCallback() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+
+    var createdEditorTab: (TerminalTabID, URL?)?
+    var tabCreatedCount = 0
+    state.onEditorTabCreated = { tabID, fileURL in createdEditorTab = (tabID, fileURL) }
+    state.onTabCreated = { tabCreatedCount += 1 }
+
+    let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
+    let tabID = state.createEditorTab(fileURL: fileURL)
+
+    let tab = state.tabManager.tabs.first { $0.id == tabID }
+    #expect(tab?.kind == .editor)
+    #expect(tab?.icon == "doc.text")
+    #expect(tab?.title == "main.swift")
+    #expect(state.isEditorTab(tabID))
+    #expect(state.tabManager.selectedTabId == tabID)
+    // Editor tabs allocate no split tree / surface.
+    #expect(state.surfaceIDs(inTab: tabID).isEmpty)
+    #expect(!state.hasAnySurface)
+    #expect(createdEditorTab?.0 == tabID)
+    #expect(createdEditorTab?.1 == fileURL)
+    #expect(tabCreatedCount == 1)
+  }
+
+  @Test func createEditorTabWithNilFileURLTitlesUntitled() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    let tabID = state.createEditorTab(fileURL: nil)
+    let tab = state.tabManager.tabs.first { $0.id == tabID }
+    #expect(tab?.title == "Untitled")
+    #expect(tab?.kind == .editor)
+  }
+
+  @Test func closeEditorTabRemovesTabAndFiresTabRemoved() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    var removedTabID: TerminalTabID?
+    state.onTabRemoved = { removedTabID = $0 }
+
+    let tabID = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/a.swift"))
+    state.closeTab(tabID)
+
+    #expect(state.tabManager.tabs.contains { $0.id == tabID } == false)
+    #expect(removedTabID == tabID)
+  }
+
+  @Test func setEditorTabDirtyFlipsTabDirtyIndicator() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    let tabID = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/a.swift"))
+    #expect(state.tabManager.tabs.first { $0.id == tabID }?.isDirty == false)
+
+    state.setEditorTabDirty(tabID, isDirty: true)
+    #expect(state.tabManager.tabs.first { $0.id == tabID }?.isDirty == true)
+
+    state.setEditorTabDirty(tabID, isDirty: false)
+    #expect(state.tabManager.tabs.first { $0.id == tabID }?.isDirty == false)
+  }
+
+  @Test func setEditorTabDirtyIgnoresTerminalTabs() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    // A real terminal tab (created via ensureInitialTab) must not be dirtied
+    // through the editor-only path.
+    state.ensureInitialTab(focusing: false)
+    guard let terminalTabID = state.tabManager.selectedTabId else {
+      Issue.record("Expected an initial terminal tab")
+      return
+    }
+    state.setEditorTabDirty(terminalTabID, isDirty: true)
+    #expect(state.tabManager.tabs.first { $0.id == terminalTabID }?.isDirty == false)
+  }
+
   private func makeWorktree(id: String = "/tmp/repo/wt-1") -> Worktree {
     let name = URL(fileURLWithPath: id).lastPathComponent
     return Worktree(

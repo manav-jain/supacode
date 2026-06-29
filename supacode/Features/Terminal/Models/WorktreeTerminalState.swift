@@ -169,6 +169,9 @@ final class WorktreeTerminalState {
   var onNotificationReceived: ((UUID, String, String) -> Void)?
   var onNotificationIndicatorChanged: (() -> Void)?
   var onTabCreated: (() -> Void)?
+  /// Fires when an editor tab is created. Manager forwards `(tabID, fileURL)`
+  /// upstream so the TCA layer spawns the tab's `EditorFeature.State`.
+  var onEditorTabCreated: ((TerminalTabID, URL?) -> Void)?
   var onTabClosed: (() -> Void)?
   /// Fires when the user renames a tab. Manager forwards to the layout-persist
   /// sink so a custom title survives relaunch without waiting for quit.
@@ -332,6 +335,49 @@ final class WorktreeTerminalState {
       onSetupScriptConsumed?()
     }
     return tabId
+  }
+
+  /// Creates an in-app editor tab. Unlike a terminal tab it allocates NO split
+  /// tree and no Ghostty surface; the per-tab editor state lives in TCA
+  /// (`TerminalsFeature.editorTabs`). The `(tabID, fileURL)` is forwarded via
+  /// `onEditorTabCreated` so the reducer can spawn the matching
+  /// `EditorFeature.State`. The tab participates in selection / close / rename /
+  /// reorder through the existing `tabManager` paths, which are generic over
+  /// `TerminalTabID`.
+  @discardableResult
+  func createEditorTab(
+    fileURL: URL?,
+    tabID: UUID? = nil,
+    focusing: Bool = true
+  ) -> TerminalTabID {
+    let title = fileURL?.lastPathComponent ?? "Untitled"
+    let createdTabID = tabManager.createTab(
+      title: title,
+      icon: "doc.text",
+      isTitleLocked: false,
+      kind: .editor,
+      id: tabID,
+    )
+    updateShouldHideTabBar()
+    onEditorTabCreated?(createdTabID, fileURL)
+    onTabCreated?()
+    if focusing {
+      tabManager.selectTab(createdTabID)
+    }
+    return createdTabID
+  }
+
+  /// True when the tab is an in-app editor tab (no split tree / surface).
+  func isEditorTab(_ tabID: TerminalTabID) -> Bool {
+    tabManager.kind(tabID) == .editor
+  }
+
+  /// Mirrors an editor tab's unsaved-changes state onto its tab dirty indicator
+  /// (drives the tab-bar shimmer). Editor-only so a terminal tab can't be
+  /// dirtied through this path.
+  func setEditorTabDirty(_ tabID: TerminalTabID, isDirty: Bool) {
+    guard isEditorTab(tabID) else { return }
+    tabManager.updateDirty(tabID, isDirty: isDirty)
   }
 
   /// Stops a single user-defined script identified by its definition ID.
@@ -721,13 +767,20 @@ final class WorktreeTerminalState {
   }
 
   func closeTab(_ tabId: TerminalTabID) {
+    // Editor tabs own no split tree / surface: just drop the tab and tell the
+    // TCA layer to remove the matching `EditorFeature.State`.
+    let isEditor = isEditorTab(tabId)
     let closedBlockingKind = blockingScripts.removeValue(forKey: tabId)
     cleanupBlockingScriptLaunchDirectory(for: tabId)
     // Clear lingering tab tracking for completed or non-blocking tabs.
     for (kind, tracked) in lastBlockingScriptTabByKind where tracked == tabId {
       lastBlockingScriptTabByKind.removeValue(forKey: kind)
     }
-    removeTree(for: tabId)
+    if isEditor {
+      onTabRemoved?(tabId)
+    } else {
+      removeTree(for: tabId)
+    }
     tabManager.closeTab(tabId)
     updateShouldHideTabBar()
     if let selected = tabManager.selectedTabId {
@@ -1066,6 +1119,8 @@ final class WorktreeTerminalState {
     for tab in tabManager.tabs {
       // Blocking-script tabs die with the app; persisting them would resurrect a dead session.
       if tab.isBlockingScript { continue }
+      // Editor tabs own no split tree; layout restore is terminal-only in this phase.
+      if tab.kind == .editor { continue }
       guard let tree = trees[tab.id], let root = tree.root else {
         layoutLogger.warning("Skipping tab \(tab.id.rawValue) during snapshot capture (no tree)")
         continue
@@ -1899,6 +1954,9 @@ final class WorktreeTerminalState {
   }
 
   private func focusSurface(in tabId: TerminalTabID) {
+    // Editor tabs have no surface to focus — and `splitTree(for:)` would
+    // otherwise lazily allocate a terminal surface for them. Bail early.
+    guard !isEditorTab(tabId) else { return }
     if let focusedId = focusedSurfaceIdByTab[tabId], let surface = surfaces[focusedId] {
       focusSurface(surface, in: tabId)
       return

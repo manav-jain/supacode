@@ -51,12 +51,6 @@ struct AppFeature {
     var worktreeMenuSnapshot: WorktreeMenuSnapshot = .init()
     @Presents var alert: AlertState<Alert>?
     @Presents var deeplinkInputConfirmation: DeeplinkInputConfirmationFeature.State?
-    /// The in-app Supacode editor, presented in a dedicated editor window. v1
-    /// hosts a single editor at a time (terminal-peer tab integration is a
-    /// follow-up — see `EditorFeature`). Reached only via the `.supacode` open
-    /// path, which `OpenWorktreeAction` exposes only when `FeatureFlag.editorView`
-    /// is on, so this is implicitly flag-gated.
-    @Presents var editor: EditorFeature.State?
 
     init(
       repositories: RepositoriesFeature.State = .init(),
@@ -144,7 +138,6 @@ struct AppFeature {
     case deeplinkReferenceOpened
     case alert(PresentationAction<Alert>)
     case deeplinkInputConfirmation(PresentationAction<DeeplinkInputConfirmationFeature.Action>)
-    case editor(PresentationAction<EditorFeature.Action>)
     case terminalEvent(TerminalClient.Event)
   }
 
@@ -1141,6 +1134,11 @@ struct AppFeature {
       case .terminalEvent(.tabProjectionChanged(let worktreeID, let projection)):
         return .send(.terminals(.tabProjectionChanged(worktreeID: worktreeID, projection: projection)))
 
+      case .terminalEvent(.editorTabCreated(let worktreeID, let tabID, let fileURL)):
+        return .send(
+          .terminals(.editorTabOpened(worktreeID: worktreeID, tabID: tabID, fileURL: fileURL))
+        )
+
       case .terminalEvent(.tabRemoved(let worktreeID, let tabID)):
         return .send(.terminals(.tabRemoved(worktreeID: worktreeID, tabID: tabID)))
 
@@ -1151,6 +1149,20 @@ struct AppFeature {
         return .send(
           .terminals(.terminalTabs(.element(id: tabID, action: .progressDisplayChanged(display))))
         )
+
+      case .terminals(
+        .editorTabs(.element(let tabIDRaw, .delegate(.dirtyChanged(let isDirty))))):
+        // Mirror the editor's unsaved-changes state onto the tab dirty
+        // indicator (tab-bar shimmer). Look up the owning worktree recorded
+        // when the editor tab was opened.
+        let tabID = TerminalTabID(rawValue: tabIDRaw)
+        guard
+          let worktreeID = state.terminals.editorTabWorktreeIDs[tabID],
+          let worktree = state.repositories.worktree(for: worktreeID)
+        else { return .none }
+        return .run { _ in
+          await terminalClient.send(.setEditorTabDirty(worktree, tabID: tabID, isDirty: isDirty))
+        }
 
       case .terminals:
         return .none
@@ -1166,12 +1178,6 @@ struct AppFeature {
         return .send(.agentPresence(.hookEventReceived(event)))
 
       case .terminalEvent:
-        return .none
-
-      case .editor:
-        // Editor child actions (binding / load / save / dirty delegate) are
-        // handled by the scoped `EditorFeature` via `.ifLet`. Nothing at the
-        // app level reacts to them in v1.
         return .none
       }
     }
@@ -1199,9 +1205,6 @@ struct AppFeature {
     }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
-    }
-    .ifLet(\.$editor, action: \.editor) {
-      EditorFeature()
     }
     Reduce { state, action in
       // Cold-path gate. Without this, an agent storm fires
@@ -1316,11 +1319,13 @@ struct AppFeature {
     }
     analyticsClient.capture("worktree_opened", ["action": action.settingsID, "source": source.rawValue])
     if action == .supacode {
-      // Open the in-app Supacode editor with no file bound (the user opens a
-      // file from within). v1 hosts it in a dedicated editor window; the
-      // terminal-peer tab integration is a follow-up.
-      appLogger.info("Open in Supacode editor for \(worktree.id)")
-      return presentEditor(fileURL: nil, state: &state)
+      // Open the in-app Supacode editor as a tab peer to the worktree's terminal
+      // tabs. No file bound (the user opens a file from within); the editor tab
+      // renders its empty state until a file is loaded.
+      appLogger.info("Open in Supacode editor tab for \(worktree.id)")
+      return .run { _ in
+        await terminalClient.send(.createEditorTab(worktree, fileURL: nil))
+      }
     }
     guard action == .editor else {
       return .run { send in
@@ -1392,31 +1397,18 @@ struct AppFeature {
     // feature-flag state so a since-uninstalled editor falls back gracefully.
     let action = OpenWorktreeAction.availableSelection(state.openActionSelection)
     if action == .supacode {
-      // Open the file in the in-app Supacode editor. v1 hosts it in a dedicated
-      // editor window; the terminal-peer tab integration is a follow-up.
-      appLogger.info("Open file in Supacode editor for \(worktree.id): \(fileURL.lastPathComponent)")
-      return presentEditor(fileURL: fileURL, state: &state)
+      // Open the file in the in-app Supacode editor as a tab peer to the
+      // worktree's terminal tabs.
+      appLogger.info("Open file in Supacode editor tab for \(worktree.id): \(fileURL.lastPathComponent)")
+      return .run { _ in
+        await terminalClient.send(.createEditorTab(worktree, fileURL: fileURL))
+      }
     }
     return .run { send in
       await workspaceClient.openFile(action, worktree, fileURL) { error in
         send(.openWorktreeFailed(error))
       }
     }
-  }
-
-  /// Present the in-app Supacode editor for `fileURL` (or an empty editor when
-  /// `nil`). Reuses the already-open editor window if one exists — opening a new
-  /// file just re-targets the live editor via `.open(_:)` — otherwise it seeds a
-  /// fresh `EditorFeature.State`. The actual disk read is kicked off by sending
-  /// `.editor(.presented(.open(_:)))` so it flows through the scoped reducer's
-  /// cancellable load effect. The editor window itself is opened by the
-  /// `openEditorWindowOnPresentation` view bridge watching `state.editor`.
-  private func presentEditor(fileURL: URL?, state: inout State) -> Effect<Action> {
-    if state.editor == nil {
-      state.editor = EditorFeature.State(fileURL: fileURL)
-    }
-    guard let fileURL else { return .none }
-    return .send(.editor(.presented(.open(fileURL))))
   }
 
   // MARK: - Deeplink handling.

@@ -252,6 +252,10 @@ final class WorktreeTerminalManager {
       Task {
         createTabAsync(in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, initialInput: input, tabID: id)
       }
+    case .createEditorTab(let worktree, let fileURL, let id):
+      _ = state(for: worktree).createEditorTab(fileURL: fileURL, tabID: id)
+    case .setEditorTabDirty(let worktree, let tabID, let isDirty):
+      state(for: worktree).setEditorTabDirty(tabID, isDirty: isDirty)
     case .ensureInitialTab(let worktree, let runSetupScriptIfNew, let focusing):
       let state = state(for: worktree) { runSetupScriptIfNew }
       state.ensureInitialTab(focusing: focusing)
@@ -327,11 +331,11 @@ final class WorktreeTerminalManager {
       state(for: worktree).navigateSearchOnFocusedSurface(.previous)
     case .endSearch(let worktree):
       state(for: worktree).performBindingActionOnFocusedSurface("end_search")
-    case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
-      .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
-      .performBindingActionOnSurface, .selectTab, .focusSurface, .splitSurface, .destroyTab,
-      .destroySurface, .prune, .setNotificationsEnabled, .setSelectedWorktreeID,
-      .refreshTabBarVisibility, .beginTabRename:
+    case .createTab, .createTabWithInput, .createEditorTab, .setEditorTabDirty, .ensureInitialTab,
+      .stopRunScript, .stopScript, .runBlockingScript, .closeFocusedTab, .closeFocusedSurface,
+      .performBindingAction, .performBindingActionOnSurface, .selectTab, .focusSurface,
+      .splitSurface, .destroyTab, .destroySurface, .prune, .setNotificationsEnabled,
+      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
       return false
     }
     return true
@@ -343,11 +347,11 @@ final class WorktreeTerminalManager {
       state(for: worktree).performBindingActionOnFocusedSurface(action)
     case .performBindingActionOnSurface(let worktree, let surfaceID, let action):
       state(for: worktree).performBindingAction(action, onSurfaceID: surfaceID)
-    case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
-      .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
-      .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .focusSurface,
-      .splitSurface, .destroyTab, .destroySurface, .prune, .setNotificationsEnabled,
-      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
+    case .createTab, .createTabWithInput, .createEditorTab, .setEditorTabDirty, .ensureInitialTab,
+      .stopRunScript, .stopScript, .runBlockingScript, .closeFocusedTab, .closeFocusedSurface,
+      .startSearch, .searchSelection, .navigateSearchNext, .navigateSearchPrevious, .endSearch,
+      .selectTab, .focusSurface, .splitSurface, .destroyTab, .destroySurface, .prune,
+      .setNotificationsEnabled, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
       return false
     }
     return true
@@ -372,11 +376,11 @@ final class WorktreeTerminalManager {
       }
       selectedWorktreeID = id
       terminalLogger.info("Selected worktree \(id?.rawValue ?? "nil")")
-    case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
-      .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
-      .performBindingActionOnSurface, .startSearch, .searchSelection, .navigateSearchNext,
-      .navigateSearchPrevious, .endSearch, .selectTab, .focusSurface, .splitSurface, .destroyTab,
-      .destroySurface, .beginTabRename:
+    case .createTab, .createTabWithInput, .createEditorTab, .setEditorTabDirty, .ensureInitialTab,
+      .stopRunScript, .stopScript, .runBlockingScript, .closeFocusedTab, .closeFocusedSurface,
+      .performBindingAction, .performBindingActionOnSurface, .startSearch, .searchSelection,
+      .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .focusSurface,
+      .splitSurface, .destroyTab, .destroySurface, .beginTabRename:
       assertionFailure("Unhandled terminal command reached management handler: \(command)")
     }
   }
@@ -488,6 +492,9 @@ final class WorktreeTerminalManager {
       self?.emit(.tabCreated(worktreeID: worktree.id))
       self?.emitProjection(for: worktree.id)
       self?.markLayoutDirty(worktreeID: worktree.id)
+    }
+    state.onEditorTabCreated = { [weak self] tabID, fileURL in
+      self?.emit(.editorTabCreated(worktreeID: worktree.id, tabID: tabID, fileURL: fileURL))
     }
     state.onTabClosed = { [weak self] in
       self?.emit(.tabClosed(worktreeID: worktree.id))

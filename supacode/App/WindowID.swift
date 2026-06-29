@@ -4,5 +4,4 @@ enum WindowID {
   static let settings = "settings"
   static let deeplinkReference = "deeplink-reference"
   static let cliReference = "cli-reference"
-  static let editor = "editor"
 }
