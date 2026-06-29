@@ -4,26 +4,41 @@ import SupacodeSettingsShared
 
 nonisolated private let fileSearchLogger = SupaLogger("FileSearch")
 
+/// A single search root: one worktree's on-disk working directory plus the
+/// "Repo / Worktree" label used to attribute results in Global scope. The
+/// `worktreeID` lets the finder open a result in the editor for the worktree it
+/// actually came from, even when searching across every repository.
+nonisolated struct FileSearchRoot: Equatable, Sendable {
+  let worktreeID: Worktree.ID
+  let url: URL
+  let displayName: String
+}
+
 /// A single file match surfaced by the quick-open finder. `relativePath` is the
-/// path relative to the search root and doubles as the stable identity (used for
-/// display and de-duplication in the results list).
+/// path relative to its search root; `id` is qualified by `worktreeID` so the
+/// same relative path under two different roots stays distinct in Global scope.
+/// `rootDisplayName` carries the owning root's "Repo / Worktree" label for the
+/// repo-qualified Global row.
 nonisolated struct FileSearchResult: Equatable, Sendable, Identifiable {
   let absoluteURL: URL
   let relativePath: String
-  var id: String { relativePath }
+  let worktreeID: Worktree.ID
+  let rootDisplayName: String
+  var id: String { "\(worktreeID.rawValue):\(relativePath)" }
 }
 
-/// Worktree-scoped quick-open file finder. Mirrors the `WorkspaceClient`
-/// dependency shape: a single `@Sendable` closure plus a `DependencyKey`
-/// conformance so reducers can inject a stub in tests.
+/// Quick-open file finder. Mirrors the `WorkspaceClient` dependency shape: a
+/// single `@Sendable` closure plus a `DependencyKey` conformance so reducers can
+/// inject a stub in tests. Multi-root so a single call can span one worktree
+/// (Worktree scope) or every local worktree (Global scope).
 struct FileSearchClient: Sendable {
-  var search: @Sendable (_ query: String, _ root: URL, _ maxResults: Int) async -> [FileSearchResult]
+  var search: @Sendable (_ query: String, _ roots: [FileSearchRoot], _ maxResults: Int) async -> [FileSearchResult]
 }
 
 extension FileSearchClient: DependencyKey {
-  nonisolated static let liveValue = FileSearchClient { query, root, maxResults in
+  nonisolated static let liveValue = FileSearchClient { query, roots, maxResults in
     await Task.detached(priority: .userInitiated) {
-      FileSearchRanker.search(query: query, root: root, maxResults: maxResults)
+      await FileSearchRanker.search(query: query, roots: roots, maxResults: maxResults)
     }
     .value
   }
@@ -64,16 +79,38 @@ nonisolated enum FileSearchRanker {
     "target",
   ]
 
-  /// Hard cap on files scanned so a huge tree can't stall the finder.
+  /// Hard cap on files scanned *per root* so a huge tree can't stall the finder.
+  /// Global scope spans many roots, so the cap stays per-root; the merged set is
+  /// bounded again by `maxResults`.
   static let maxFilesScanned = 20_000
 
-  /// Enumerate regular files under `root`, then rank them against `query`.
-  /// When `query` is empty the first `maxResults` files are returned in stable
-  /// enumeration order. Runs synchronously; the live client hops it off the main
-  /// thread.
-  static func search(query: String, root: URL, maxResults: Int) -> [FileSearchResult] {
+  /// Enumerate every root concurrently (off-main), merge the tagged candidates,
+  /// rank the whole set against `query`, and cap at `maxResults`. When `query`
+  /// is empty the first `maxResults` candidates are returned in stable
+  /// per-root-then-merge order. The single-root case (Worktree scope) is just a
+  /// one-element `roots`.
+  static func search(query: String, roots: [FileSearchRoot], maxResults: Int) async -> [FileSearchResult] {
+    guard maxResults > 0, !roots.isEmpty else { return [] }
+    // Enumerate roots concurrently so Global scope across many repos isn't a
+    // serial walk. Each task tags its candidates with the owning root, and the
+    // merged order follows the input root order for a stable empty-query list.
+    let merged: [FileSearchResult] = await withTaskGroup(of: (Int, [FileSearchResult]).self) { group in
+      for (index, root) in roots.enumerated() {
+        group.addTask { (index, enumerateFiles(root: root)) }
+      }
+      var byIndex: [Int: [FileSearchResult]] = [:]
+      for await (index, candidates) in group {
+        byIndex[index] = candidates
+      }
+      return roots.indices.flatMap { byIndex[$0] ?? [] }
+    }
+    return rank(query: query, candidates: merged, maxResults: maxResults)
+  }
+
+  /// Pure ranking over an already-enumerated (and possibly multi-root) candidate
+  /// set. Split out from enumeration so it is directly unit-testable.
+  static func rank(query: String, candidates: [FileSearchResult], maxResults: Int) -> [FileSearchResult] {
     guard maxResults > 0 else { return [] }
-    let candidates = enumerateFiles(root: root)
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
       return Array(candidates.prefix(maxResults))
@@ -99,22 +136,22 @@ nonisolated enum FileSearchRanker {
     return ranked.prefix(maxResults).map(\.result)
   }
 
-  /// Walk the tree, skipping hidden entries and any excluded directory, and
-  /// return regular files (capped at `maxFilesScanned`) as `FileSearchResult`s
-  /// with their root-relative paths.
-  static func enumerateFiles(root: URL, fileManager: FileManager = .default) -> [FileSearchResult] {
+  /// Walk the tree under `root.url`, skipping hidden entries and any excluded
+  /// directory, and return regular files (capped at `maxFilesScanned`) as
+  /// `FileSearchResult`s tagged with the root's `worktreeID` + display name.
+  static func enumerateFiles(root: FileSearchRoot, fileManager: FileManager = .default) -> [FileSearchResult] {
     let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
     guard
       let enumerator = fileManager.enumerator(
-        at: root,
+        at: root.url,
         includingPropertiesForKeys: resourceKeys,
         options: [.skipsHiddenFiles]
       )
     else {
-      fileSearchLogger.warning("Unable to enumerate files at \(root.path(percentEncoded: false))")
+      fileSearchLogger.warning("Unable to enumerate files at \(root.url.path(percentEncoded: false))")
       return []
     }
-    let rootPath = root.standardizedFileURL.path(percentEncoded: false)
+    let rootPath = root.url.standardizedFileURL.path(percentEncoded: false)
     var results: [FileSearchResult] = []
     var scanned = 0
     for case let url as URL in enumerator {
@@ -131,7 +168,14 @@ nonisolated enum FileSearchRanker {
       }
       guard values?.isRegularFile == true else { continue }
       let relativePath = Self.relativePath(of: url, rootPath: rootPath)
-      results.append(FileSearchResult(absoluteURL: url, relativePath: relativePath))
+      results.append(
+        FileSearchResult(
+          absoluteURL: url,
+          relativePath: relativePath,
+          worktreeID: root.worktreeID,
+          rootDisplayName: root.displayName
+        )
+      )
     }
     return results
   }

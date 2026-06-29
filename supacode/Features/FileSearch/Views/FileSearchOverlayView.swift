@@ -36,6 +36,8 @@ struct FileSearchOverlayView: View {
                 query: $store.query,
                 selectedIndex: $store.selectedIndex,
                 results: store.results,
+                scope: store.state.scope,
+                onScopeChange: { store.send(.setScope($0)) },
                 hoveredID: $hoveredID,
                 isQueryFocused: _isQueryFocused,
                 onEvent: { event in
@@ -110,6 +112,8 @@ private struct FileSearchCard: View {
   @Binding var query: String
   @Binding var selectedIndex: Int?
   let results: [FileSearchResult]
+  let scope: FileSearchFeature.Scope
+  let onScopeChange: (FileSearchFeature.Scope) -> Void
   @Binding var hoveredID: FileSearchResult.ID?
   let isQueryFocused: FocusState<Bool>
   let onEvent: (FileSearchKeyboardEvent) -> Void
@@ -117,6 +121,10 @@ private struct FileSearchCard: View {
 
   private var backgroundColor: Color {
     Color(nsColor: .windowBackgroundColor)
+  }
+
+  private var scopeBinding: Binding<FileSearchFeature.Scope> {
+    Binding(get: { scope }, set: { onScopeChange($0) })
   }
 
   var body: some View {
@@ -127,9 +135,22 @@ private struct FileSearchCard: View {
 
       Divider()
 
+      Picker("Search scope", selection: scopeBinding) {
+        Text("Worktree").tag(FileSearchFeature.Scope.worktree)
+        Text("Global").tag(FileSearchFeature.Scope.global)
+      }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .help("Worktree searches the selected worktree; Global searches every local repository.")
+
+      Divider()
+
       FileSearchList(
         rows: results,
         selectedIndex: $selectedIndex,
+        scope: scope,
         hoveredID: $hoveredID
       ) { id in
         activate(id)
@@ -229,6 +250,7 @@ private struct FileSearchList: View {
 
   let rows: [FileSearchResult]
   @Binding var selectedIndex: Int?
+  let scope: FileSearchFeature.Scope
   @Binding var hoveredID: FileSearchResult.ID?
   let activate: (FileSearchResult.ID) -> Void
 
@@ -243,6 +265,7 @@ private struct FileSearchList: View {
               FileSearchRowView(
                 row: row,
                 isSelected: isRowSelected(index: index),
+                scope: scope,
                 hoveredID: $hoveredID
               ) {
                 activate(row.id)
@@ -273,6 +296,7 @@ private struct FileSearchList: View {
 private struct FileSearchRowView: View {
   let row: FileSearchResult
   let isSelected: Bool
+  let scope: FileSearchFeature.Scope
   @Binding var hoveredID: FileSearchResult.ID?
   let activate: () -> Void
 
@@ -280,9 +304,17 @@ private struct FileSearchRowView: View {
     (row.relativePath as NSString).lastPathComponent
   }
 
+  /// In Global scope the subtitle is repo-qualified ("Repo / Worktree · dir") so
+  /// results from different repositories are distinguishable; in Worktree scope
+  /// it is just the containing directory.
   private var subtitle: String? {
     let directory = (row.relativePath as NSString).deletingLastPathComponent
-    return directory.isEmpty ? nil : directory
+    switch scope {
+    case .worktree:
+      return directory.isEmpty ? nil : directory
+    case .global:
+      return directory.isEmpty ? row.rootDisplayName : "\(row.rootDisplayName) · \(directory)"
+    }
   }
 
   var body: some View {

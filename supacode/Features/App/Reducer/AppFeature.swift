@@ -1024,11 +1024,14 @@ struct AppFeature {
         guard FeatureFlag.quickSearch.isEnabled else { return .none }
         guard
           let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
-          let rootURL = worktree.localWorkingDirectory
+          worktree.localWorkingDirectory != nil
         else {
           return .none
         }
-        return .send(.fileSearch(.present(worktreeID: worktree.id, rootURL: rootURL)))
+        // Global scope searches every local worktree, so hand the feature the
+        // full root list; it filters to the selected one when scope is Worktree.
+        let roots = Self.fileSearchRoots(from: state.repositories)
+        return .send(.fileSearch(.present(selectedWorktreeID: worktree.id, roots: roots)))
 
       case .fileSearch(.delegate(.openFile(let url, let worktreeID))):
         guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
@@ -1321,6 +1324,33 @@ struct AppFeature {
         )
       )
     }
+  }
+
+  /// Every local worktree across all repositories, as `FileSearchRoot`s for the
+  /// quick-open finder. Only worktrees with an on-disk path and no remote host
+  /// qualify (remote worktrees can't be enumerated). The display name mirrors the
+  /// command palette's "Repo / Worktree" label (repo-name-only for folders).
+  static func fileSearchRoots(from repositories: RepositoriesFeature.State) -> [FileSearchRoot] {
+    var roots: [FileSearchRoot] = []
+    for row in repositories.orderedSidebarItems() {
+      guard
+        let worktree = repositories.worktree(for: row.id),
+        worktree.host == nil,
+        let url = worktree.localWorkingDirectory
+      else {
+        continue
+      }
+      let repositoryName = Repository.sidebarDisplayName(
+        custom: repositories.sidebar.sections[row.repositoryID]?.title,
+        fallback: repositories.repositoryName(for: row.repositoryID) ?? "Repository"
+      )
+      let worktreeDisplayName = SidebarDisplayName.resolved(custom: row.customTitle, fallback: row.name) ?? row.name
+      // Folder rows have a single synthetic "main" worktree whose name matches the
+      // repo, so "Repo / Worktree" would read "Foo / Foo"; use the repo name alone.
+      let displayName = row.isFolder ? repositoryName : "\(repositoryName) / \(worktreeDisplayName)"
+      roots.append(FileSearchRoot(worktreeID: worktree.id, url: url, displayName: displayName))
+    }
+    return roots
   }
 
   /// Open a single file from the quick-open finder in the user's selected
