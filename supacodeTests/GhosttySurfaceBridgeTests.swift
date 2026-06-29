@@ -65,13 +65,38 @@ struct GhosttySurfaceBridgeTests {
   }
 
   @Test
-  func openUrlRequestTreatsUnknownStringAsFilePath() {
+  func openUrlRequestAnchorsRelativePathToWorkingDirectory() {
     let request = ghosttyOpenURLRequest(
-      urlString: "relative/path",
-      kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN
+      urlString: "src/app/main.swift",
+      kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN,
+      workingDirectory: "/tmp/project"
     )
 
     #expect(request?.url.isFileURL == true)
+    #expect(request?.url.path == "/tmp/project/src/app/main.swift")
+  }
+
+  @Test
+  func openUrlRequestIgnoresWorkingDirectoryForAbsolutePath() {
+    let request = ghosttyOpenURLRequest(
+      urlString: "/etc/hosts",
+      kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN,
+      workingDirectory: "/tmp/project"
+    )
+
+    #expect(request?.url.path == "/etc/hosts")
+  }
+
+  @Test
+  func openUrlRequestExpandsTildeInWorkingDirectory() {
+    let request = ghosttyOpenURLRequest(
+      urlString: "notes.md",
+      kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN,
+      workingDirectory: "~/Documents"
+    )
+
+    let expectedBase = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Documents")
+    #expect(request?.url.path == expectedBase.appending(path: "notes.md").path)
   }
 
   @Test

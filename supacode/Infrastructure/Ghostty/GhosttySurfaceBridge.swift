@@ -29,7 +29,8 @@ struct GhosttyOpenURLRequest: Equatable {
 
 func ghosttyOpenURLRequest(
   urlString: String?,
-  kind: ghostty_action_open_url_kind_e
+  kind: ghostty_action_open_url_kind_e,
+  workingDirectory: String? = nil
 ) -> GhosttyOpenURLRequest? {
   guard let urlString = urlString?.trimmingCharacters(in: .whitespacesAndNewlines),
     !urlString.isEmpty
@@ -39,7 +40,13 @@ func ghosttyOpenURLRequest(
     url = candidate
   } else {
     let expanded = NSString(string: urlString).expandingTildeInPath
-    url = URL(filePath: expanded).standardizedFileURL
+    // Anchor a relative path to the terminal's working directory (OSC 7 pwd)
+    // rather than the app process's cwd. Foundation ignores `relativeTo:` once
+    // `expanded` is absolute, so scheme URLs and absolute/tilde paths are unaffected.
+    let base = workingDirectory
+      .map { NSString(string: $0).expandingTildeInPath }
+      .flatMap { $0.isEmpty ? nil : URL(filePath: $0, directoryHint: .isDirectory) }
+    url = URL(filePath: expanded, relativeTo: base).standardizedFileURL
   }
   return GhosttyOpenURLRequest(kind: GhosttyOpenURLKind(kind), url: url)
 }
@@ -456,7 +463,7 @@ final class GhosttySurfaceBridge {
       state.openUrlKind = openUrl.kind
       let rawUrl = string(from: openUrl.url, length: openUrl.len)
       state.openUrl = rawUrl
-      if let request = ghosttyOpenURLRequest(urlString: rawUrl, kind: openUrl.kind) {
+      if let request = ghosttyOpenURLRequest(urlString: rawUrl, kind: openUrl.kind, workingDirectory: state.pwd) {
         SupaLogger("GhosttySurfaceBridge").debug("OPEN_URL raw=\(rawUrl ?? "nil") resolved=\(request.url)")
         NSWorkspace.shared.open(request.url)
       }
