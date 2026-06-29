@@ -134,6 +134,28 @@ struct SettingsFeatureTests {
     #expect(settingsFile.global.systemNotificationsEnabled == true)
   }
 
+  @Test(.dependencies) func pickingNotificationSoundPersistsAndPreviewsIt() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.notificationSound = .classic
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let played = LockIsolated<[NotificationSound]>([])
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0[NotificationSoundClient.self].play = { sound in played.withValue { $0.append(sound) } }
+    }
+
+    await store.send(.binding(.set(\.notificationSound, .chooChoo))) {
+      $0.notificationSound = .chooChoo
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.notificationSound == .chooChoo)
+    #expect(played.value == [.chooChoo])
+  }
+
   @Test(.dependencies) func settingsPersistDoesNotTouchRemoteRepositoryRoots() async {
     let remote = TestRemoteRepo(host: RemoteHost(alias: "devbox"), remotePath: "/home/me/proj")
     @Shared(.settingsFile) var settingsFile

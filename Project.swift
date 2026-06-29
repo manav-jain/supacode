@@ -22,6 +22,13 @@ let appResources: ResourceFileElements = [
   "supacode/AppIcon.icon",
   "supacode/Assets.xcassets",
   "supacode/notification.wav",
+  // Selectable notification tones (see scripts/generate-notification-sounds.py).
+  "supacode/Sounds/chime.wav",
+  "supacode/Sounds/choo-choo.wav",
+  "supacode/Sounds/ding.wav",
+  "supacode/Sounds/gong.wav",
+  "supacode/Sounds/inbound-train.wav",
+  "supacode/Sounds/stand-clear.wav",
 ]
 
 let appBuildableFolders: [BuildableFolder] = [
