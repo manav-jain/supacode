@@ -432,6 +432,7 @@ struct SupacodeApp: App {
       }
       .openSettingsOnSelection(store: store)
       .openDeeplinkReferenceOnRequest(store: store)
+      .openEditorWindowOnPresentation(store: store)
     }
     .handlesExternalEvents(matching: [])
     .environment(ghosttyShortcuts)
@@ -508,5 +509,40 @@ struct SupacodeApp: App {
     .windowToolbarStyle(.unified)
     .defaultSize(width: 720, height: 640)
     .restorationBehavior(.disabled)
+    Window("Editor", id: WindowID.editor) {
+      EditorWindowContent(store: store)
+        .environment(ghosttyShortcuts)
+        .environment(commandKeyObserver)
+    }
+    .handlesExternalEvents(matching: [])
+    .windowToolbarStyle(.unified)
+    .defaultSize(width: 900, height: 640)
+    .restorationBehavior(.disabled)
+  }
+}
+
+/// Hosts the in-app Supacode editor in its dedicated window. Renders the scoped
+/// `EditorView` when an editor is presented, an empty state otherwise, and tells
+/// the store the window was dismissed so reopening re-presents cleanly. v1 hosts
+/// a single editor at a time; the terminal-peer tab integration is a follow-up.
+private struct EditorWindowContent: View {
+  @Bindable var store: StoreOf<AppFeature>
+
+  var body: some View {
+    Group {
+      if let editorStore = store.scope(state: \.editor, action: \.editor.presented) {
+        EditorView(store: editorStore)
+          .navigationTitle(editorStore.fileURL?.lastPathComponent ?? "Editor")
+      } else {
+        ContentUnavailableView(
+          "No File Open",
+          systemImage: "doc.text",
+          description: Text("Open a file with the Supacode editor to start editing.")
+        )
+      }
+    }
+    .onDisappear {
+      store.send(.editor(.dismiss))
+    }
   }
 }

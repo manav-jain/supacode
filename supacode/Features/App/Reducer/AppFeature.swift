@@ -51,6 +51,12 @@ struct AppFeature {
     var worktreeMenuSnapshot: WorktreeMenuSnapshot = .init()
     @Presents var alert: AlertState<Alert>?
     @Presents var deeplinkInputConfirmation: DeeplinkInputConfirmationFeature.State?
+    /// The in-app Supacode editor, presented in a dedicated editor window. v1
+    /// hosts a single editor at a time (terminal-peer tab integration is a
+    /// follow-up — see `EditorFeature`). Reached only via the `.supacode` open
+    /// path, which `OpenWorktreeAction` exposes only when `FeatureFlag.editorView`
+    /// is on, so this is implicitly flag-gated.
+    @Presents var editor: EditorFeature.State?
 
     init(
       repositories: RepositoriesFeature.State = .init(),
@@ -138,6 +144,7 @@ struct AppFeature {
     case deeplinkReferenceOpened
     case alert(PresentationAction<Alert>)
     case deeplinkInputConfirmation(PresentationAction<DeeplinkInputConfirmationFeature.Action>)
+    case editor(PresentationAction<EditorFeature.Action>)
     case terminalEvent(TerminalClient.Event)
   }
 
@@ -379,7 +386,7 @@ struct AppFeature {
           appLogger.warning("openWorktreeInApp: worktree \(worktreeID) not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: action, source: .contextMenu, state: state)
+        return openWorktreeEffect(worktree: worktree, action: action, source: .contextMenu, state: &state)
 
       case .repositories(.delegate(.openRepositorySettings(let repositoryID))):
         guard let repository = state.repositories.repositories[id: repositoryID] else {
@@ -505,14 +512,14 @@ struct AppFeature {
           appLogger.warning("revealInFinder: selected worktree not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: .finder, source: .revealInFinder, state: state)
+        return openWorktreeEffect(worktree: worktree, action: .finder, source: .revealInFinder, state: &state)
 
       case .openWorktree(let action):
         guard let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID) else {
           appLogger.warning("openWorktree: selected worktree not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: action, source: .toolbar, state: state)
+        return openWorktreeEffect(worktree: worktree, action: action, source: .toolbar, state: &state)
 
       case .openWorktreeFailed(let error):
         state.alert = AlertState {
@@ -1035,7 +1042,7 @@ struct AppFeature {
 
       case .fileSearch(.delegate(.openFile(let url, let worktreeID))):
         guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
-        return openFileEffect(worktree: worktree, fileURL: url, state: state)
+        return openFileEffect(worktree: worktree, fileURL: url, state: &state)
 
       case .fileSearch:
         return .none
@@ -1160,6 +1167,12 @@ struct AppFeature {
 
       case .terminalEvent:
         return .none
+
+      case .editor:
+        // Editor child actions (binding / load / save / dirty delegate) are
+        // handled by the scoped `EditorFeature` via `.ifLet`. Nothing at the
+        // app level reacts to them in v1.
+        return .none
       }
     }
     core
@@ -1186,6 +1199,9 @@ struct AppFeature {
     }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
+    }
+    .ifLet(\.$editor, action: \.editor) {
+      EditorFeature()
     }
     Reduce { state, action in
       // Cold-path gate. Without this, an agent storm fires
@@ -1283,7 +1299,7 @@ struct AppFeature {
     worktree: Worktree,
     action: OpenWorktreeAction,
     source: OpenWorktreeSource,
-    state: State
+    state: inout State
   ) -> Effect<Action> {
     // Orphan rows can't be opened anywhere meaningful; bail out
     // before invoking the workspace / terminal client.
@@ -1300,11 +1316,11 @@ struct AppFeature {
     }
     analyticsClient.capture("worktree_opened", ["action": action.settingsID, "source": source.rawValue])
     if action == .supacode {
-      // The in-app Supacode editor opens as a terminal-peer tab; that wiring lands in a
-      // later phase. Until then this is a no-op seam so selecting Supacode doesn't fall
-      // through to the external-app opener.
-      appLogger.info("Open in Supacode editor for \(worktree.id) — pending in-app editor tab")
-      return .none
+      // Open the in-app Supacode editor with no file bound (the user opens a
+      // file from within). v1 hosts it in a dedicated editor window; the
+      // terminal-peer tab integration is a follow-up.
+      appLogger.info("Open in Supacode editor for \(worktree.id)")
+      return presentEditor(fileURL: nil, state: &state)
     }
     guard action == .editor else {
       return .run { send in
@@ -1360,7 +1376,7 @@ struct AppFeature {
   private func openFileEffect(
     worktree: Worktree,
     fileURL: URL,
-    state: State
+    state: inout State
   ) -> Effect<Action> {
     if worktree.isMissing {
       appLogger.info("Ignoring file open for missing worktree \(worktree.id)")
@@ -1376,17 +1392,31 @@ struct AppFeature {
     // feature-flag state so a since-uninstalled editor falls back gracefully.
     let action = OpenWorktreeAction.availableSelection(state.openActionSelection)
     if action == .supacode {
-      // The in-app Supacode editor tab is wired in a later phase. Until then
-      // this is a no-op seam so selecting Supacode doesn't fall through to the
-      // external-app opener.
-      appLogger.info("Open file in Supacode editor for \(worktree.id) — pending in-app editor (Phase 4)")
-      return .none
+      // Open the file in the in-app Supacode editor. v1 hosts it in a dedicated
+      // editor window; the terminal-peer tab integration is a follow-up.
+      appLogger.info("Open file in Supacode editor for \(worktree.id): \(fileURL.lastPathComponent)")
+      return presentEditor(fileURL: fileURL, state: &state)
     }
     return .run { send in
       await workspaceClient.openFile(action, worktree, fileURL) { error in
         send(.openWorktreeFailed(error))
       }
     }
+  }
+
+  /// Present the in-app Supacode editor for `fileURL` (or an empty editor when
+  /// `nil`). Reuses the already-open editor window if one exists — opening a new
+  /// file just re-targets the live editor via `.open(_:)` — otherwise it seeds a
+  /// fresh `EditorFeature.State`. The actual disk read is kicked off by sending
+  /// `.editor(.presented(.open(_:)))` so it flows through the scoped reducer's
+  /// cancellable load effect. The editor window itself is opened by the
+  /// `openEditorWindowOnPresentation` view bridge watching `state.editor`.
+  private func presentEditor(fileURL: URL?, state: inout State) -> Effect<Action> {
+    if state.editor == nil {
+      state.editor = EditorFeature.State(fileURL: fileURL)
+    }
+    guard let fileURL else { return .none }
+    return .send(.editor(.presented(.open(fileURL))))
   }
 
   // MARK: - Deeplink handling.
