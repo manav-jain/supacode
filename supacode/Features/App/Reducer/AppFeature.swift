@@ -1269,6 +1269,13 @@ struct AppFeature {
       return .none
     }
     analyticsClient.capture("worktree_opened", ["action": action.settingsID, "source": source.rawValue])
+    if action == .supacode {
+      // The in-app Supacode editor opens as a terminal-peer tab; that wiring lands in a
+      // later phase. Until then this is a no-op seam so selecting Supacode doesn't fall
+      // through to the external-app opener.
+      appLogger.info("Open in Supacode editor for \(worktree.id) — pending in-app editor tab")
+      return .none
+    }
     guard action == .editor else {
       return .run { send in
         await workspaceClient.open(action, worktree) { error in

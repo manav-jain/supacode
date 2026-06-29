@@ -5,6 +5,7 @@ public enum SettingsSection: Hashable {
   case notifications
   case worktree
   case developer
+  case featureFlags
   case shortcuts
   case updates
   case github
