@@ -113,11 +113,11 @@ extension AppFeature.Action {
     // change that DOES affect a snapshot input flows back through a separate
     // `.terminalEvent.notificationIndicatorChanged` (counted above) or a
     // `.repositories` cache invalidation (the cacheInvalidations gate above).
-    case .agentPresence, .terminals, .commandPalette, .updates:
+    case .agentPresence, .terminals, .commandPalette, .fileSearch, .updates:
       return false
     // Lifecycle / UI / effect-dispatch actions never write snapshot inputs
     // directly; any downstream mutation flows back through a classified arm.
-    case .appLaunched, .scenePhaseChanged, .openActionSelectionChanged,
+    case .appLaunched, .scenePhaseChanged, .presentFileSearch, .openActionSelectionChanged,
       .worktreeSettingsLoaded, .openSelectedWorktree, .revealInFinder,
       .openWorktree, .openWorktreeFailed, .requestQuit,
       .requestTerminateAllTerminalSessions, .newTerminal,

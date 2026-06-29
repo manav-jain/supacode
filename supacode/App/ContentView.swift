@@ -128,6 +128,11 @@ struct ContentView: View {
         ghosttyShortcuts: ghosttyShortcuts
       )
     }
+    .overlay {
+      FileSearchOverlayView(
+        store: store.scope(state: \.fileSearch, action: \.fileSearch)
+      )
+    }
     .background(WindowTabbingDisabler())
     .background(WindowChromeObserver(runtime: terminalManager.ghosttyRuntime))
     .background(

@@ -447,6 +447,13 @@ struct SupacodeApp: App {
         }
         .appKeyboardShortcut(AppShortcuts.commandPalette.effective(from: store.settings.shortcutOverrides))
         .help("Command Palette")
+        if FeatureFlag.quickSearch.isEnabled {
+          Button("Search Files…") {
+            store.send(.presentFileSearch)
+          }
+          .appKeyboardShortcut(AppShortcuts.searchFiles.effective(from: store.settings.shortcutOverrides))
+          .help("Search files in the selected worktree")
+        }
       }
       UpdateCommands(store: store.scope(state: \.updates, action: \.updates))
       CommandGroup(replacing: .singleWindowList) {

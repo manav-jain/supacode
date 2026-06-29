@@ -27,6 +27,7 @@ struct AppFeature {
     var settings: SettingsFeature.State
     var updates = UpdatesFeature.State()
     var commandPalette = CommandPaletteFeature.State()
+    var fileSearch = FileSearchFeature.State()
     /// Terminal-orchestration state. Owns the per-tab feature collection so
     /// tab-bar views scope through `\.terminals` (narrow) instead of the full
     /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
@@ -107,6 +108,8 @@ struct AppFeature {
     case settings(SettingsFeature.Action)
     case updates(UpdatesFeature.Action)
     case commandPalette(CommandPaletteFeature.Action)
+    case fileSearch(FileSearchFeature.Action)
+    case presentFileSearch
     case openActionSelectionChanged(OpenWorktreeAction)
     case worktreeSettingsLoaded(RepositorySettings, worktreeID: Worktree.ID)
     case openSelectedWorktree
@@ -1013,6 +1016,27 @@ struct AppFeature {
       case .commandPalette:
         return .none
 
+      case .presentFileSearch:
+        // Gated behind the feature flag and a local worktree selection. A
+        // hotkey can reach here regardless of the menu's enabled state, so the
+        // guard lives in the reducer too. Remote worktrees have no on-disk path
+        // to enumerate, so `localWorkingDirectory` is the gate.
+        guard FeatureFlag.quickSearch.isEnabled else { return .none }
+        guard
+          let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
+          let rootURL = worktree.localWorkingDirectory
+        else {
+          return .none
+        }
+        return .send(.fileSearch(.present(worktreeID: worktree.id, rootURL: rootURL)))
+
+      case .fileSearch(.delegate(.openFile(let url, let worktreeID))):
+        guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
+        return openFileEffect(worktree: worktree, fileURL: url, state: state)
+
+      case .fileSearch:
+        return .none
+
       case .terminalEvent(.notificationReceived(let worktreeID, let surfaceID, let title, let body)):
         var effects: [Effect<Action>] = [
           .send(.repositories(.worktreeNotificationReceived(worktreeID)))
@@ -1154,6 +1178,9 @@ struct AppFeature {
     Scope(state: \.commandPalette, action: \.commandPalette) {
       CommandPaletteFeature()
     }
+    Scope(state: \.fileSearch, action: \.fileSearch) {
+      FileSearchFeature()
+    }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
     }
@@ -1293,6 +1320,42 @@ struct AppFeature {
           runSetupScriptIfNew: shouldRunSetupScript
         )
       )
+    }
+  }
+
+  /// Open a single file from the quick-open finder in the user's selected
+  /// editor. Mirrors `openWorktreeEffect`'s pre-screens (missing / remote) and
+  /// editor resolution, but targets the file URL rather than the worktree root.
+  /// `.supacode` is a no-op seam until the in-app editor tab lands (Phase 4).
+  private func openFileEffect(
+    worktree: Worktree,
+    fileURL: URL,
+    state: State
+  ) -> Effect<Action> {
+    if worktree.isMissing {
+      appLogger.info("Ignoring file open for missing worktree \(worktree.id)")
+      return .none
+    }
+    if worktree.host != nil {
+      appLogger.info("Ignoring file open for remote worktree \(worktree.id)")
+      return .none
+    }
+    // Resolve the editor the same way the app does for the selected worktree.
+    // `openActionSelection` already reflects this worktree's repo setting +
+    // default-editor fallback; `availableSelection` re-validates install /
+    // feature-flag state so a since-uninstalled editor falls back gracefully.
+    let action = OpenWorktreeAction.availableSelection(state.openActionSelection)
+    if action == .supacode {
+      // The in-app Supacode editor tab is wired in a later phase. Until then
+      // this is a no-op seam so selecting Supacode doesn't fall through to the
+      // external-app opener.
+      appLogger.info("Open file in Supacode editor for \(worktree.id) — pending in-app editor (Phase 4)")
+      return .none
+    }
+    return .run { send in
+      await workspaceClient.openFile(action, worktree, fileURL) { error in
+        send(.openWorktreeFailed(error))
+      }
     }
   }
 
