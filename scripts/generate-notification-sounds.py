@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Synthesize Supacode's bundled notification sounds.
 
-Every sound this script emits is generated from scratch with additive
-synthesis — there is no sampled or third-party audio involved, so the
-output is original work that ships under the repository's license with
-no attribution or trademark concerns. (Notably we deliberately do *not*
-reproduce real transit jingles such as SNCF, NYC MTA, SF Muni or the
-Paris Métro, which are trademarked recordings.)
+The sounds this script emits — chime, ding, gong, inbound-train and
+stand-clear — are generated from scratch with additive synthesis, so they
+are original work with no attribution or trademark concerns.
+
+Two bundled sounds are NOT produced here and are left untouched:
+  * supacode/notification.wav — the long-standing "Classic" sound.
+  * supacode/Sounds/choo-choo.wav — a converted third-party recording
+    (see supacode/Sounds/README.md for its source and licensing).
 
 Run from the repo root:
 
     python3 scripts/generate-notification-sounds.py
-
-It (re)writes the .wav files under supacode/Sounds/. The existing
-"Classic" sound (supacode/notification.wav) is left untouched.
 
 Pure standard library — no numpy / ffmpeg / sox required.
 """
@@ -21,7 +20,6 @@ Pure standard library — no numpy / ffmpeg / sox required.
 import array
 import math
 import os
-import random
 import struct
 import wave
 
@@ -52,28 +50,6 @@ class Buffer:
                 f += vibrato_depth * math.sin(2 * math.pi * vibrato_hz * t)
             phase += 2 * math.pi * f / SAMPLE_RATE
             self.samples[i] += amp * env * math.sin(phase)
-
-    def add_tone(self, freq, amp, start, duration, *, attack=0.02, release=0.08,
-                 vibrato_hz=0.0, vibrato_depth=0.0, noise=0.0):
-        """Add a sustained tone with an attack/sustain/release envelope (whistle)."""
-        start_i = int(start * SAMPLE_RATE)
-        end_i = min(len(self.samples), start_i + int(duration * SAMPLE_RATE))
-        phase = 0.0
-        last_noise = 0.0
-        for i in range(start_i, end_i):
-            t = (i - start_i) / SAMPLE_RATE
-            remaining = (end_i - i) / SAMPLE_RATE
-            env = min(1.0, t / attack) * min(1.0, remaining / release)
-            f = freq
-            if vibrato_depth:
-                f += vibrato_depth * math.sin(2 * math.pi * vibrato_hz * t)
-            phase += 2 * math.pi * f / SAMPLE_RATE
-            value = math.sin(phase)
-            if noise:
-                # One-pole low-passed white noise for a touch of steam "air".
-                last_noise = 0.85 * last_noise + 0.15 * (random.random() * 2 - 1)
-                value += noise * last_noise
-            self.samples[i] += amp * env * value
 
 
 def normalize(buf, peak=0.89):
@@ -135,21 +111,6 @@ def gong():
     return normalize(buf)
 
 
-def choo_choo():
-    """A two-blast steam train whistle ("choo… choooo")."""
-    buf = Buffer(1.7)
-    # A wailing chord of partials gives the classic steam-whistle timbre.
-    chord = ((392.00, 1.0), (466.16, 0.85), (587.33, 0.7), (784.00, 0.4))
-    blasts = ((0.0, 0.34), (0.46, 0.78))  # (start, duration) — short then long
-    for start, duration in blasts:
-        for freq, amp in chord:
-            buf.add_tone(freq, amp, start, duration,
-                         attack=0.025, release=0.12,
-                         vibrato_hz=5.5, vibrato_depth=freq * 0.01,
-                         noise=0.18)
-    return normalize(buf)
-
-
 def inbound_train():
     """An ascending two-note arrival chime (perfect fourth up)."""
     buf = Buffer(1.2)
@@ -169,12 +130,9 @@ def stand_clear():
 
 
 def main():
-    # Deterministic noise so reruns produce byte-identical files.
-    random.seed(20260629)
     write_wav("chime.wav", chime())
     write_wav("ding.wav", ding())
     write_wav("gong.wav", gong())
-    write_wav("choo-choo.wav", choo_choo())
     write_wav("inbound-train.wav", inbound_train())
     write_wav("stand-clear.wav", stand_clear())
 
