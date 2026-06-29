@@ -78,6 +78,26 @@ struct SettingsFilePersistenceTests {
     #expect(reloaded == .default)
   }
 
+  @Test func decodesNotificationSoundWithResilientFallback() throws {
+    func decodedSound(_ soundEntry: String) throws -> NotificationSound {
+      let json = """
+        {
+          "appearanceMode": "dark",
+          "updatesAutomaticallyCheckForUpdates": true,
+          "updatesAutomaticallyDownloadUpdates": false\(soundEntry)
+        }
+        """
+      return try JSONDecoder().decode(GlobalSettings.self, from: Data(json.utf8)).notificationSound
+    }
+
+    // Absent key (existing settings files) falls back to the original tone.
+    #expect(try decodedSound("") == .classic)
+    // A persisted selection round-trips by raw value.
+    #expect(try decodedSound(", \"notificationSound\": \"chooChoo\"") == .chooChoo)
+    // An unrecognized value from a newer build degrades to the default, not a decode failure.
+    #expect(try decodedSound(", \"notificationSound\": \"martian-gong\"") == .classic)
+  }
+
   @Test(.dependencies) func decodesLegacyAutoArchiveTrueAsMergedWorktreeActionArchive() throws {
     let legacy = LegacySettingsFileWithArchiveFlag(
       global: LegacyGlobalSettingsWithArchiveFlag(

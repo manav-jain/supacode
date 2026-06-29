@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import SupacodeSettingsShared
 import SwiftUI
 
 public struct NotificationsSettingsView: View {
@@ -26,6 +27,16 @@ public struct NotificationsSettingsView: View {
               + " according to your settings."
           )
         }.disabled(store.systemNotificationsEnabled)
+        Picker(selection: $store.notificationSound) {
+          ForEach(NotificationSound.allCases) { sound in
+            Text(sound.label).tag(sound)
+          }
+        } label: {
+          Text("Notification sound")
+          Text("Pick a tone to hear it.")
+        }
+        .disabled(store.systemNotificationsEnabled || !store.notificationSoundEnabled)
+        .help("The sound played when a notification arrives.")
       }
       Section("Worktrees") {
         Toggle(

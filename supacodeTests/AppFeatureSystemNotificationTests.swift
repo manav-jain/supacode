@@ -164,7 +164,7 @@ struct AppFeatureSystemNotificationTests {
     ) {
       AppFeature()
     } withDependencies: {
-      $0.notificationSoundClient.play = {
+      $0.notificationSoundClient.play = { _ in
         plays.withValue { $0 += 1 }
       }
       $0.systemNotificationClient.send = { _, _, _ in }
@@ -200,7 +200,7 @@ struct AppFeatureSystemNotificationTests {
     ) {
       AppFeature()
     } withDependencies: {
-      $0.notificationSoundClient.play = {
+      $0.notificationSoundClient.play = { _ in
         plays.withValue { $0 += 1 }
       }
       $0.systemNotificationClient.send = { _, _, _ in

@@ -34,6 +34,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var updatesAutomaticallyDownloadUpdates: Bool
   public var inAppNotificationsEnabled: Bool
   public var notificationSoundEnabled: Bool
+  public var notificationSound: NotificationSound
   public var systemNotificationsEnabled: Bool
   public var moveNotifiedWorktreeToTop: Bool
   public var analyticsEnabled: Bool
@@ -75,6 +76,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     updatesAutomaticallyDownloadUpdates: false,
     inAppNotificationsEnabled: true,
     notificationSoundEnabled: true,
+    notificationSound: .classic,
     systemNotificationsEnabled: false,
     moveNotifiedWorktreeToTop: true,
     analyticsEnabled: true,
@@ -109,6 +111,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     updatesAutomaticallyDownloadUpdates: Bool,
     inAppNotificationsEnabled: Bool,
     notificationSoundEnabled: Bool,
+    notificationSound: NotificationSound = .classic,
     systemNotificationsEnabled: Bool = false,
     moveNotifiedWorktreeToTop: Bool,
     analyticsEnabled: Bool,
@@ -141,6 +144,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.updatesAutomaticallyDownloadUpdates = updatesAutomaticallyDownloadUpdates
     self.inAppNotificationsEnabled = inAppNotificationsEnabled
     self.notificationSoundEnabled = notificationSoundEnabled
+    self.notificationSound = notificationSound
     self.systemNotificationsEnabled = systemNotificationsEnabled
     self.moveNotifiedWorktreeToTop = moveNotifiedWorktreeToTop
     self.analyticsEnabled = analyticsEnabled
@@ -195,6 +199,12 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     notificationSoundEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .notificationSoundEnabled)
       ?? Self.default.notificationSoundEnabled
+    // `try?` swallows an unrecognized raw value from a newer build and falls
+    // back to `.classic` rather than failing the whole decode.
+    notificationSound =
+      (try? container.decodeIfPresent(NotificationSound.self, forKey: .notificationSound))
+      .flatMap { $0 }
+      ?? Self.default.notificationSound
     systemNotificationsEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .systemNotificationsEnabled)
       ?? Self.default.systemNotificationsEnabled

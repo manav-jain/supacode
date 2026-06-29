@@ -48,6 +48,7 @@ public struct SettingsFeature {
     public var updatesAutomaticallyDownloadUpdates: Bool
     public var inAppNotificationsEnabled: Bool
     public var notificationSoundEnabled: Bool
+    public var notificationSound: NotificationSound
     public var systemNotificationsEnabled: Bool
     public var moveNotifiedWorktreeToTop: Bool
     public var analyticsEnabled: Bool
@@ -90,6 +91,7 @@ public struct SettingsFeature {
       updatesAutomaticallyDownloadUpdates = settings.updatesAutomaticallyDownloadUpdates
       inAppNotificationsEnabled = settings.inAppNotificationsEnabled
       notificationSoundEnabled = settings.notificationSoundEnabled
+      notificationSound = settings.notificationSound
       systemNotificationsEnabled = settings.systemNotificationsEnabled
       moveNotifiedWorktreeToTop = settings.moveNotifiedWorktreeToTop
       analyticsEnabled = settings.analyticsEnabled
@@ -126,6 +128,7 @@ public struct SettingsFeature {
         updatesAutomaticallyDownloadUpdates: updatesAutomaticallyDownloadUpdates,
         inAppNotificationsEnabled: inAppNotificationsEnabled,
         notificationSoundEnabled: notificationSoundEnabled,
+        notificationSound: notificationSound,
         systemNotificationsEnabled: systemNotificationsEnabled,
         moveNotifiedWorktreeToTop: moveNotifiedWorktreeToTop,
         analyticsEnabled: analyticsEnabled,
@@ -203,6 +206,7 @@ public struct SettingsFeature {
   @Dependency(AgentIntegrationClient.self) private var agentIntegrationClient
   @Dependency(ArchivedWorktreeDatesClient.self) private var archivedWorktreeDatesClient
   @Dependency(SystemNotificationClient.self) private var systemNotificationClient
+  @Dependency(NotificationSoundClient.self) private var notificationSoundClient
   @Dependency(\.date.now) private var now
 
   public init() {}
@@ -264,6 +268,7 @@ public struct SettingsFeature {
         state.updatesAutomaticallyDownloadUpdates = normalizedSettings.updatesAutomaticallyDownloadUpdates
         state.inAppNotificationsEnabled = normalizedSettings.inAppNotificationsEnabled
         state.notificationSoundEnabled = normalizedSettings.notificationSoundEnabled
+        state.notificationSound = normalizedSettings.notificationSound
         state.systemNotificationsEnabled = normalizedSettings.systemNotificationsEnabled
         state.moveNotifiedWorktreeToTop = normalizedSettings.moveNotifiedWorktreeToTop
         state.analyticsEnabled = normalizedSettings.analyticsEnabled
@@ -291,6 +296,16 @@ public struct SettingsFeature {
         state.syncGlobalDefaults(from: normalizedSettings)
         synchronizeRepositorySelection(for: &state)
         return .send(.delegate(.settingsChanged(normalizedSettings)))
+
+      case .binding(\.notificationSound):
+        // Audition the tone the moment it's picked, like macOS's own alert
+        // sound picker. Persist as usual via the shared path below.
+        state.syncGlobalDefaults(from: state.globalSettings)
+        let sound = state.notificationSound
+        return .merge(
+          persist(state),
+          .run { _ in await notificationSoundClient.play(sound) }
+        )
 
       case .binding:
         state.syncGlobalDefaults(from: state.globalSettings)

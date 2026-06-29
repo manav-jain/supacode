@@ -1026,9 +1026,10 @@ struct AppFeature {
           )
         }
         if state.settings.notificationSoundEnabled && !state.settings.systemNotificationsEnabled {
+          let sound = state.settings.notificationSound
           effects.append(
             .run { _ in
-              await notificationSoundClient.play()
+              await notificationSoundClient.play(sound)
             }
           )
         }
