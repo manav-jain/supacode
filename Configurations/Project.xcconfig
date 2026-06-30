@@ -3,3 +3,16 @@ CURRENT_PROJECT_VERSION = 144
 POSTHOG_API_KEY =
 POSTHOG_HOST =
 SENTRY_DSN =
+
+// STTextView ships as static frameworks. Its `@objc` methods declared in Swift
+// *extensions* compile to Objective-C categories, which the linker drops when
+// they're only reached via `objc_msgSend` (no symbol reference) — at runtime the
+// class is missing them and AppKit throws "unrecognized selector" (e.g.
+// `cancelComplete:`, `readablePasteboardTypes`, the NSTextInputClient methods),
+// crashing the in-app editor on macOS 26. `-force_load` pulls every object
+// (incl. those categories) from STTextView's static archives so the real methods
+// register. Scoped to the two STTextView frameworks that vend the AppKit
+// NSView / NSTextLayoutManager subclasses — a blanket `-ObjC` instead drags in
+// other deps' auto-linked frameworks (CoreAudioTypes) and SwiftUICore, breaking
+// the link. Flows into the app target via `OTHER_LDFLAGS = $(inherited) -lc++`.
+OTHER_LDFLAGS = $(inherited) -force_load $(BUILT_PRODUCTS_DIR)/STTextViewAppKit.framework/STTextViewAppKit -force_load $(BUILT_PRODUCTS_DIR)/STTextViewCommon.framework/STTextViewCommon
