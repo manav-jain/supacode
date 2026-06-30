@@ -50,6 +50,8 @@ let appDependencies: [TargetDependency] = [
   .external(name: "Sharing"),
   .external(name: "Sparkle"),
   .external(name: "STTextView"),
+  .external(name: "SwiftTreeSitter"),
+  .external(name: "TreeSitterSwift"),
 ]
 
 let testDependencies: [TargetDependency] = [
