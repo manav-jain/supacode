@@ -384,4 +384,103 @@ struct EditorFeatureTests {
     }
     // No `.open` / `.fileLoaded` follow-up — nothing else to drain.
   }
+
+  // MARK: - Toggle diff on loads the diff; toggle off clears it.
+
+  @Test func toggleDiffOnLoadsThenOffClears() async {
+    let url = URL(filePath: "/tmp/diffable.swift")
+    let sampleDiff = FileDiff(hunks: [
+      DiffHunk(
+        id: 0,
+        header: "@@ -1 +1 @@",
+        oldStart: 1,
+        oldCount: 1,
+        newStart: 1,
+        newCount: 1,
+        lines: [
+          DiffLine(id: 0, kind: .removed, text: "old", oldLineNumber: 1, newLineNumber: nil),
+          DiffLine(id: 1, kind: .added, text: "new", oldLineNumber: nil, newLineNumber: 1),
+        ]
+      )
+    ])
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID, fileURL: url, text: "old")) {
+      EditorFeature()
+    } withDependencies: {
+      $0.fileDiffClient.diff = { _ in sampleDiff }
+    }
+
+    // Turning the diff on flips `showingDiff`, marks it loading, then loads.
+    await store.send(.toggleDiff) {
+      $0.showingDiff = true
+      $0.isDiffLoading = true
+    }
+    await store.receive(\.diffLoaded) {
+      $0.diff = sampleDiff
+      $0.isDiffLoading = false
+    }
+
+    // Turning it off clears the diff state.
+    await store.send(.toggleDiff) {
+      $0.showingDiff = false
+      $0.diff = nil
+    }
+  }
+
+  // MARK: - Toggle diff with no file is a pure flag flip (no load).
+
+  @Test func toggleDiffWithoutFileDoesNotLoad() async {
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID)) {
+      EditorFeature()
+    }
+    // No fileURL → toggling on flips the flag but kicks off no diff load.
+    await store.send(.toggleDiff) {
+      $0.showingDiff = true
+    }
+    await store.send(.toggleDiff) {
+      $0.showingDiff = false
+    }
+  }
+
+  // MARK: - Saving while the diff is shown refreshes it.
+
+  @Test func saveRefreshesShownDiff() async {
+    let url = URL(filePath: "/tmp/refresh.swift")
+    let refreshed = FileDiff(hunks: [
+      DiffHunk(
+        id: 0,
+        header: "@@ -1 +1,2 @@",
+        oldStart: 1,
+        oldCount: 1,
+        newStart: 1,
+        newCount: 2,
+        lines: [
+          DiffLine(id: 0, kind: .added, text: "fresh", oldLineNumber: nil, newLineNumber: 1)
+        ]
+      )
+    ])
+    let store = TestStore(
+      initialState: EditorFeature.State(
+        id: Self.fixedID,
+        fileURL: url,
+        text: "draft",
+        isDirty: true,
+        showingDiff: true
+      )
+    ) {
+      EditorFeature()
+    } withDependencies: {
+      $0.editorFileClient.write = { _, _ in }
+      $0.fileDiffClient.diff = { _ in refreshed }
+    }
+
+    await store.send(.save)
+    await store.receive(\.saved) {
+      $0.isDirty = false
+    }
+    await store.receive(\.delegate.dirtyChanged)
+    // The save path re-runs the diff because it's showing.
+    await store.receive(\.diffLoaded) {
+      $0.diff = refreshed
+    }
+  }
 }

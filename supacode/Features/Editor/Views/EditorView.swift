@@ -57,12 +57,22 @@ struct EditorView: View {
         errorState(message: loadError)
       } else if store.fileURL == nil {
         emptyState
+      } else if store.showingDiff {
+        DiffView(diff: store.diff, isLoading: store.isDiffLoading)
       } else {
         editor
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(.background)
+    // The diff toggle sits at the top-trailing corner whenever a file is bound,
+    // so it's available both to enter diff mode (from the editor) and to leave it
+    // (from the diff panel).
+    .overlay(alignment: .topTrailing) {
+      if store.fileURL != nil, store.loadError == nil {
+        diffToggleButton
+      }
+    }
     // ⌘S — explicit save. Hidden command button so the shortcut is owned by the
     // focused editor without adding chrome.
     .background {
@@ -79,6 +89,22 @@ struct EditorView: View {
         .accessibilityHidden(true)
         .disabled(highlightModel.symbols.isEmpty)
     }
+  }
+
+  /// Toolbar button that toggles the working-tree-vs-HEAD diff view. Tinted while
+  /// the diff is showing so its on/off state reads at a glance.
+  private var diffToggleButton: some View {
+    Button {
+      store.send(.toggleDiff)
+    } label: {
+      Label("Diff", systemImage: "plusminus")
+        .labelStyle(.iconOnly)
+    }
+    .buttonStyle(.bordered)
+    .tint(store.showingDiff ? .accentColor : nil)
+    .controlSize(.small)
+    .padding(8)
+    .help(store.showingDiff ? "Hide changes (return to editing)" : "Show changes since HEAD")
   }
 
   /// Scroll to `store.pendingScrollLine` once the buffer is loaded, then clear

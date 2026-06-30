@@ -42,6 +42,17 @@ struct EditorFeature {
     /// after the load lands, then clears it via `scrollLineConsumed`. `nil` when
     /// there's no pending jump.
     var pendingScrollLine: Int?
+    /// True when the diff view (working tree vs HEAD) is shown in place of the
+    /// editable text. Toggled by the toolbar diff button (Phase 9). While on, the
+    /// diff is (re)loaded on toggle, after a save, and after an external reload.
+    var showingDiff: Bool
+    /// The parsed working-tree-vs-HEAD diff for `fileURL`, or `nil` when there are
+    /// no changes / the file isn't tracked / isn't in a repo. Only meaningful
+    /// while `showingDiff`.
+    var diff: FileDiff?
+    /// True while a diff computation is in flight, so the view can show a loading
+    /// state instead of a premature "No changes".
+    var isDiffLoading: Bool
 
     init(
       id: UUID = UUID(),
@@ -51,7 +62,10 @@ struct EditorFeature {
       loadError: String? = nil,
       isLoading: Bool = false,
       externallyModified: Bool = false,
-      pendingScrollLine: Int? = nil
+      pendingScrollLine: Int? = nil,
+      showingDiff: Bool = false,
+      diff: FileDiff? = nil,
+      isDiffLoading: Bool = false
     ) {
       self.id = id
       self.fileURL = fileURL
@@ -61,6 +75,9 @@ struct EditorFeature {
       self.isLoading = isLoading
       self.externallyModified = externallyModified
       self.pendingScrollLine = pendingScrollLine
+      self.showingDiff = showingDiff
+      self.diff = diff
+      self.isDiffLoading = isDiffLoading
     }
   }
 
@@ -101,6 +118,15 @@ struct EditorFeature {
     /// Debounced auto-save fired. Re-checks the guards (still dirty, still has a
     /// URL, no unresolved conflict) before delegating to `save`.
     case autoSaveFired
+    /// Toolbar diff button. Flips `showingDiff`; turning it on kicks off a diff
+    /// computation, turning it off clears the diff state.
+    case toggleDiff
+    /// Re-run the diff computation while it's already shown (after save / external
+    /// reload). No-op when the diff isn't showing or there's no file.
+    case refreshDiff
+    /// The async diff computation finished with the parsed diff (or `nil` for no
+    /// changes / untracked / not-a-repo).
+    case diffLoaded(FileDiff?)
     case delegate(Delegate)
   }
 
@@ -117,6 +143,7 @@ struct EditorFeature {
     case watch(UUID)
     case autoSave(UUID)
     case externalRead(UUID)
+    case diff(UUID)
   }
 
   /// Debounce window after the user stops typing before auto-save fires.
@@ -124,6 +151,7 @@ struct EditorFeature {
 
   @Dependency(\.editorFileClient) private var editorFileClient
   @Dependency(\.fileWatchClient) private var fileWatchClient
+  @Dependency(\.fileDiffClient) private var fileDiffClient
   @Dependency(\.continuousClock) private var clock
 
   var body: some Reducer<State, Action> {
@@ -191,7 +219,12 @@ struct EditorFeature {
         state.text = text
         state.isLoading = false
         state.loadError = nil
-        return Self.markDirty(&state, dirty: false)
+        // The on-disk contents just changed under the buffer (initial load or a
+        // conflict-resolving reload). If the diff is showing, recompute it.
+        return .merge(
+          Self.markDirty(&state, dirty: false),
+          diffRefreshEffectIfShown(state: state)
+        )
 
       case .loadFailed(let message):
         state.isLoading = false
@@ -216,7 +249,11 @@ struct EditorFeature {
         .cancellable(id: CancelID.save(editorID), cancelInFlight: true)
 
       case .saved:
-        return Self.markDirty(&state, dirty: false)
+        // A save changed the working tree; refresh the diff if it's showing.
+        return .merge(
+          Self.markDirty(&state, dirty: false),
+          diffRefreshEffectIfShown(state: state)
+        )
 
       case .saveFailed(let message):
         editorLogger.warning("Failed to save \(state.fileURL?.lastPathComponent ?? "<none>"): \(message)")
@@ -251,10 +288,14 @@ struct EditorFeature {
           state.externallyModified = true
           return .none
         }
-        // Clean buffer: safe to silently reload to the on-disk contents.
+        // Clean buffer: safe to silently reload to the on-disk contents. The
+        // working tree changed, so refresh the diff if it's showing.
         state.text = diskText
         state.loadError = nil
-        return Self.markDirty(&state, dirty: false)
+        return .merge(
+          Self.markDirty(&state, dirty: false),
+          diffRefreshEffectIfShown(state: state)
+        )
 
       case .reloadFromDisk:
         // Resolve the conflict by discarding local edits and re-reading. Clearing
@@ -290,6 +331,37 @@ struct EditorFeature {
           !state.externallyModified
         else { return .none }
         return .send(.save)
+
+      case .toggleDiff:
+        state.showingDiff.toggle()
+        guard state.showingDiff else {
+          // Turning the diff off: clear the state and cancel any in-flight load.
+          state.diff = nil
+          state.isDiffLoading = false
+          return .cancel(id: CancelID.diff(state.id))
+        }
+        // Turning it on: load (or reload) the diff. No file → nothing to diff.
+        guard let url = state.fileURL else {
+          state.diff = nil
+          state.isDiffLoading = false
+          return .none
+        }
+        state.isDiffLoading = true
+        return diffEffect(url: url, editorID: state.id)
+
+      case .refreshDiff:
+        // Re-run only while the diff is actually showing and we have a file.
+        guard state.showingDiff, let url = state.fileURL else { return .none }
+        state.isDiffLoading = true
+        return diffEffect(url: url, editorID: state.id)
+
+      case .diffLoaded(let diff):
+        // A stale completion (the user toggled the diff off mid-flight) must not
+        // resurrect the diff panel.
+        guard state.showingDiff else { return .none }
+        state.diff = diff
+        state.isDiffLoading = false
+        return .none
 
       case .delegate:
         return .none
@@ -333,6 +405,26 @@ struct EditorFeature {
       await send(.autoSaveFired)
     }
     .cancellable(id: CancelID.autoSave(editorID), cancelInFlight: true)
+  }
+
+  /// Compute the working-tree-vs-HEAD diff for `url` off the main actor and feed
+  /// it back as `.diffLoaded`. Cancellable + cancel-in-flight keyed on the editor
+  /// id so a re-toggle / refresh supersedes an older computation.
+  private func diffEffect(url: URL, editorID: UUID) -> Effect<Action> {
+    let fileDiffClient = self.fileDiffClient
+    return .run { send in
+      let diff = await fileDiffClient.diff(url)
+      await send(.diffLoaded(diff))
+    }
+    .cancellable(id: CancelID.diff(editorID), cancelInFlight: true)
+  }
+
+  /// Refresh the diff only when the panel is currently showing and there's a
+  /// file to diff; otherwise no-op. Used by the save / external-reload paths so
+  /// the shown diff tracks the latest working-tree state.
+  private func diffRefreshEffectIfShown(state: State) -> Effect<Action> {
+    guard state.showingDiff, let url = state.fileURL else { return .none }
+    return diffEffect(url: url, editorID: state.id)
   }
 
   /// Set `isDirty` and emit `delegate(.dirtyChanged)` only when it actually
