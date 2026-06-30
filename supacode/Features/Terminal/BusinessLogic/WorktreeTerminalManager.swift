@@ -252,8 +252,8 @@ final class WorktreeTerminalManager {
       Task {
         createTabAsync(in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, initialInput: input, tabID: id)
       }
-    case .createEditorTab(let worktree, let fileURL, let id):
-      _ = state(for: worktree).createEditorTab(fileURL: fileURL, tabID: id)
+    case .createEditorTab(let worktree, let fileURL, let line, let id):
+      _ = state(for: worktree).createEditorTab(fileURL: fileURL, line: line, tabID: id)
     case .setEditorTabDirty(let worktree, let tabID, let isDirty):
       state(for: worktree).setEditorTabDirty(tabID, isDirty: isDirty)
     case .ensureInitialTab(let worktree, let runSetupScriptIfNew, let focusing):
@@ -493,8 +493,8 @@ final class WorktreeTerminalManager {
       self?.emitProjection(for: worktree.id)
       self?.markLayoutDirty(worktreeID: worktree.id)
     }
-    state.onEditorTabCreated = { [weak self] tabID, fileURL in
-      self?.emit(.editorTabCreated(worktreeID: worktree.id, tabID: tabID, fileURL: fileURL))
+    state.onEditorTabCreated = { [weak self] tabID, fileURL, line in
+      self?.emit(.editorTabCreated(worktreeID: worktree.id, tabID: tabID, fileURL: fileURL, line: line))
       // Editor tabs now persist in the layout snapshot, so a new editor tab
       // must dirty the layout the same way a new terminal tab does.
       self?.markLayoutDirty(worktreeID: worktree.id)

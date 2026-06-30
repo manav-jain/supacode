@@ -453,6 +453,11 @@ struct SupacodeApp: App {
           }
           .appKeyboardShortcut(AppShortcuts.searchFiles.effective(from: store.settings.shortcutOverrides))
           .help("Search files in the selected worktree")
+          Button("Find in Files…") {
+            store.send(.presentContentSearch)
+          }
+          .appKeyboardShortcut(AppShortcuts.findInFiles.effective(from: store.settings.shortcutOverrides))
+          .help("Search file contents in the selected worktree")
         }
       }
       UpdateCommands(store: store.scope(state: \.updates, action: \.updates))

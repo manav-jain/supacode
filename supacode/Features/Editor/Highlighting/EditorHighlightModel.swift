@@ -104,6 +104,38 @@ final class EditorHighlightModel {
     scrollPlugin.textView?.scrollRangeToVisible(symbol.range)
   }
 
+  /// Scroll the underlying text view to the start of the given 1-based `line`
+  /// in `text` and return the line's start range so the caller can also drive
+  /// the selection binding. Returns `nil` when the line is out of bounds.
+  /// Reuses the same `scrollRangeToVisible` mechanism as Go-to-Symbol (Phase 5b).
+  @discardableResult
+  func revealLine(_ line: Int, in text: String) -> NSRange? {
+    guard let range = Self.startRange(ofLine: line, in: text) else { return nil }
+    scrollPlugin.textView?.scrollRangeToVisible(range)
+    return range
+  }
+
+  /// Compute the zero-length `NSRange` (UTF-16) at the start of the 1-based
+  /// `line` in `text`. Newlines are counted as `\n`; a `\r\n` file still lands
+  /// on the right offset because the `\r` is part of the preceding line. Returns
+  /// `nil` when `line` is below 1 or past the last line.
+  static func startRange(ofLine line: Int, in text: String) -> NSRange? {
+    guard line >= 1 else { return nil }
+    if line == 1 { return NSRange(location: 0, length: 0) }
+    var utf16Offset = 0
+    var currentLine = 1
+    for unit in text.utf16 {
+      utf16Offset += 1
+      if unit == 0x0A {  // newline
+        currentLine += 1
+        if currentLine == line {
+          return NSRange(location: utf16Offset, length: 0)
+        }
+      }
+    }
+    return nil
+  }
+
   // MARK: - Internals
 
   /// Bumped whenever a restyle finishes; observed so the view re-renders.

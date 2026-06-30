@@ -174,9 +174,10 @@ final class WorktreeTerminalState {
   var onNotificationReceived: ((UUID, String, String) -> Void)?
   var onNotificationIndicatorChanged: (() -> Void)?
   var onTabCreated: (() -> Void)?
-  /// Fires when an editor tab is created. Manager forwards `(tabID, fileURL)`
-  /// upstream so the TCA layer spawns the tab's `EditorFeature.State`.
-  var onEditorTabCreated: ((TerminalTabID, URL?) -> Void)?
+  /// Fires when an editor tab is created. Manager forwards `(tabID, fileURL, line)`
+  /// upstream so the TCA layer spawns the tab's `EditorFeature.State`. `line`
+  /// (1-based, optional) is a find-in-files jump target.
+  var onEditorTabCreated: ((TerminalTabID, URL?, Int?) -> Void)?
   var onTabClosed: (() -> Void)?
   /// Fires when the user renames a tab. Manager forwards to the layout-persist
   /// sink so a custom title survives relaunch without waiting for quit.
@@ -352,6 +353,7 @@ final class WorktreeTerminalState {
   @discardableResult
   func createEditorTab(
     fileURL: URL?,
+    line: Int? = nil,
     tabID: UUID? = nil,
     focusing: Bool = true
   ) -> TerminalTabID {
@@ -364,6 +366,12 @@ final class WorktreeTerminalState {
     {
       if focusing {
         selectTab(existingTabID)
+      }
+      // Re-emit so a find-in-files open that lands on an already-open file still
+      // scrolls to the new line. With no line this is a no-op jump (the editor
+      // ignores a nil pending line), so a plain re-open just focuses the tab.
+      if line != nil {
+        onEditorTabCreated?(existingTabID, fileURL, line)
       }
       return existingTabID
     }
@@ -379,7 +387,7 @@ final class WorktreeTerminalState {
       editorFileURLByTab[createdTabID] = fileURL.standardizedFileURL
     }
     updateShouldHideTabBar()
-    onEditorTabCreated?(createdTabID, fileURL)
+    onEditorTabCreated?(createdTabID, fileURL, line)
     onTabCreated?()
     if focusing {
       tabManager.selectTab(createdTabID)

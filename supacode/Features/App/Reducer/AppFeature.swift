@@ -28,6 +28,7 @@ struct AppFeature {
     var updates = UpdatesFeature.State()
     var commandPalette = CommandPaletteFeature.State()
     var fileSearch = FileSearchFeature.State()
+    var contentSearch = ContentSearchFeature.State()
     /// Terminal-orchestration state. Owns the per-tab feature collection so
     /// tab-bar views scope through `\.terminals` (narrow) instead of the full
     /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
@@ -109,7 +110,9 @@ struct AppFeature {
     case updates(UpdatesFeature.Action)
     case commandPalette(CommandPaletteFeature.Action)
     case fileSearch(FileSearchFeature.Action)
+    case contentSearch(ContentSearchFeature.Action)
     case presentFileSearch
+    case presentContentSearch
     case openActionSelectionChanged(OpenWorktreeAction)
     case worktreeSettingsLoaded(RepositorySettings, worktreeID: Worktree.ID)
     case openSelectedWorktree
@@ -1040,6 +1043,26 @@ struct AppFeature {
       case .fileSearch:
         return .none
 
+      case .presentContentSearch:
+        // Same gates as `presentFileSearch`: feature flag + a local worktree
+        // selection (remote worktrees have no on-disk path to grep).
+        guard FeatureFlag.quickSearch.isEnabled else { return .none }
+        guard
+          let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
+          worktree.localWorkingDirectory != nil
+        else {
+          return .none
+        }
+        let roots = Self.contentSearchRoots(from: state.repositories)
+        return .send(.contentSearch(.present(selectedWorktreeID: worktree.id, roots: roots)))
+
+      case .contentSearch(.delegate(.openMatch(let url, let line, let worktreeID))):
+        guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
+        return openFileEffect(worktree: worktree, fileURL: url, line: line, state: &state)
+
+      case .contentSearch:
+        return .none
+
       case .terminalEvent(.notificationReceived(let worktreeID, let surfaceID, let title, let body)):
         var effects: [Effect<Action>] = [
           .send(.repositories(.worktreeNotificationReceived(worktreeID)))
@@ -1134,9 +1157,9 @@ struct AppFeature {
       case .terminalEvent(.tabProjectionChanged(let worktreeID, let projection)):
         return .send(.terminals(.tabProjectionChanged(worktreeID: worktreeID, projection: projection)))
 
-      case .terminalEvent(.editorTabCreated(let worktreeID, let tabID, let fileURL)):
+      case .terminalEvent(.editorTabCreated(let worktreeID, let tabID, let fileURL, let line)):
         return .send(
-          .terminals(.editorTabOpened(worktreeID: worktreeID, tabID: tabID, fileURL: fileURL))
+          .terminals(.editorTabOpened(worktreeID: worktreeID, tabID: tabID, fileURL: fileURL, line: line))
         )
 
       case .terminalEvent(.tabRemoved(let worktreeID, let tabID)):
@@ -1202,6 +1225,9 @@ struct AppFeature {
     }
     Scope(state: \.fileSearch, action: \.fileSearch) {
       FileSearchFeature()
+    }
+    Scope(state: \.contentSearch, action: \.contentSearch) {
+      ContentSearchFeature()
     }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
@@ -1374,6 +1400,41 @@ struct AppFeature {
     return roots
   }
 
+  /// Every local worktree across all repositories, as `ContentSearchRoot`s for
+  /// find-in-files. Mirrors `fileSearchRoots` (same local-only / display-name
+  /// rules) but additionally tags each root with `isGitRepository` so the engine
+  /// can pick `git grep` vs. the Swift walk per root.
+  static func contentSearchRoots(from repositories: RepositoriesFeature.State) -> [ContentSearchRoot] {
+    var roots: [ContentSearchRoot] = []
+    for row in repositories.orderedSidebarItems() {
+      guard
+        let worktree = repositories.worktree(for: row.id),
+        worktree.host == nil,
+        let url = worktree.localWorkingDirectory
+      else {
+        continue
+      }
+      let repositoryName = Repository.sidebarDisplayName(
+        custom: repositories.sidebar.sections[row.repositoryID]?.title,
+        fallback: repositories.repositoryName(for: row.repositoryID) ?? "Repository"
+      )
+      let worktreeDisplayName = SidebarDisplayName.resolved(custom: row.customTitle, fallback: row.name) ?? row.name
+      let displayName = row.isFolder ? repositoryName : "\(repositoryName) / \(worktreeDisplayName)"
+      // A folder row is non-git; a git worktree row is git. `row.isFolder`
+      // mirrors the repository's `isGitRepository == false` classification.
+      let isGitRepository = !row.isFolder
+      roots.append(
+        ContentSearchRoot(
+          worktreeID: worktree.id,
+          url: url,
+          displayName: displayName,
+          isGitRepository: isGitRepository
+        )
+      )
+    }
+    return roots
+  }
+
   /// Open a single file from the quick-open finder in the user's selected
   /// editor. Mirrors `openWorktreeEffect`'s pre-screens (missing / remote) and
   /// editor resolution, but targets the file URL rather than the worktree root.
@@ -1381,6 +1442,7 @@ struct AppFeature {
   private func openFileEffect(
     worktree: Worktree,
     fileURL: URL,
+    line: Int? = nil,
     state: inout State
   ) -> Effect<Action> {
     if worktree.isMissing {
@@ -1398,12 +1460,14 @@ struct AppFeature {
     let action = OpenWorktreeAction.availableSelection(state.openActionSelection)
     if action == .supacode {
       // Open the file in the in-app Supacode editor as a tab peer to the
-      // worktree's terminal tabs.
+      // worktree's terminal tabs. `line` (from find-in-files) scrolls the editor
+      // to the matched line once loaded; the dedup path re-scrolls an open file.
       appLogger.info("Open file in Supacode editor tab for \(worktree.id): \(fileURL.lastPathComponent)")
       return .run { _ in
-        await terminalClient.send(.createEditorTab(worktree, fileURL: fileURL))
+        await terminalClient.send(.createEditorTab(worktree, fileURL: fileURL, line: line))
       }
     }
+    // External editors have no line-targeting via this path; open the file.
     return .run { send in
       await workspaceClient.openFile(action, worktree, fileURL) { error in
         send(.openWorktreeFailed(error))

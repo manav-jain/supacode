@@ -49,8 +49,10 @@ struct TerminalsFeature {
     /// per-tab state if missing, then forwards to the tab's reducer.
     case tabProjectionChanged(worktreeID: Worktree.ID, projection: WorktreeTabProjection)
     /// An editor tab was created in the worktree state. Spawns the matching
-    /// `EditorFeature.State` (id == tab UUID) and kicks off the file load.
-    case editorTabOpened(worktreeID: Worktree.ID, tabID: TerminalTabID, fileURL: URL?)
+    /// `EditorFeature.State` (id == tab UUID) and kicks off the file load. `line`
+    /// (1-based, optional) is a find-in-files jump target the editor scrolls to
+    /// once loaded.
+    case editorTabOpened(worktreeID: Worktree.ID, tabID: TerminalTabID, fileURL: URL?, line: Int? = nil)
     /// Tab destroyed in the worktree state. Drops the matching feature state
     /// (terminal or editor).
     case tabRemoved(worktreeID: Worktree.ID, tabID: TerminalTabID)
@@ -73,7 +75,7 @@ struct TerminalsFeature {
         // dirty indicator), so nothing terminal-orchestration-level reacts here.
         return .none
 
-      case .editorTabOpened(let worktreeID, let tabID, let fileURL):
+      case .editorTabOpened(let worktreeID, let tabID, let fileURL, let line):
         if state.editorTabs[id: tabID.rawValue] == nil {
           // Drop a straggler arriving after the tab was already removed in this
           // worktree (mirrors `tabProjectionChanged`'s recently-removed guard).
@@ -90,6 +92,11 @@ struct TerminalsFeature {
         // Kick off the load through the scoped reducer's cancellable effect.
         // A nil fileURL leaves the editor empty (the worktree "open" entry point).
         guard let fileURL else { return .none }
+        // With a find-in-files line, open-at-line so the editor scrolls to the
+        // match once loaded (and re-scrolls when re-targeting an open file).
+        if let line {
+          return .send(.editorTabs(.element(id: tabID.rawValue, action: .openAtLine(fileURL, line: line))))
+        }
         return .send(.editorTabs(.element(id: tabID.rawValue, action: .open(fileURL))))
 
       case .tabProjectionChanged(let worktreeID, let projection):

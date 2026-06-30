@@ -334,4 +334,54 @@ struct EditorFeatureTests {
     await clock.advance(by: .milliseconds(1500))
     // No `.autoSaveFired` and no `.save` — nothing was scheduled.
   }
+
+  // MARK: - Open-at-line (find-in-files jump target).
+
+  @Test func openAtLineSeedsPendingScrollLineAndLoads() async {
+    let url = URL(filePath: "/tmp/jump.swift")
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID)) {
+      EditorFeature()
+    } withDependencies: {
+      $0.editorFileClient.read = { _ in "line one\nline two\nline three\n" }
+    }
+
+    // openAtLine seeds the pending scroll line, then delegates to `.open` since
+    // this is a fresh file. The view consumes `pendingScrollLine` once loaded.
+    await store.send(.openAtLine(url, line: 2)) {
+      $0.pendingScrollLine = 2
+    }
+    await store.receive(\.open) {
+      $0.fileURL = url
+      $0.loadError = nil
+      $0.isLoading = true
+    }
+    await store.receive(\.fileLoaded) {
+      $0.text = "line one\nline two\nline three\n"
+      $0.isLoading = false
+      $0.loadError = nil
+    }
+    // The pending line survives the load so the view can scroll to it.
+    #expect(store.state.pendingScrollLine == 2)
+
+    // The view reports it scrolled; the pending jump clears.
+    await store.send(.scrollLineConsumed) {
+      $0.pendingScrollLine = nil
+    }
+  }
+
+  @Test func openAtLineOnAlreadyOpenFileJustRetargets() async {
+    let url = URL(filePath: "/tmp/open.swift")
+    // A file already loaded (same URL, not loading, no error).
+    let store = TestStore(
+      initialState: EditorFeature.State(id: Self.fixedID, fileURL: url, text: "a\nb\nc\n")
+    ) {
+      EditorFeature()
+    }
+
+    // Re-targeting the same open file updates the pending line WITHOUT re-reading.
+    await store.send(.openAtLine(url, line: 3)) {
+      $0.pendingScrollLine = 3
+    }
+    // No `.open` / `.fileLoaded` follow-up — nothing else to drain.
+  }
 }

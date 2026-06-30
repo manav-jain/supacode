@@ -35,8 +35,9 @@ struct TerminalClient {
     case createTab(Worktree, runSetupScriptIfNew: Bool, id: UUID? = nil)
     case createTabWithInput(Worktree, input: String, runSetupScriptIfNew: Bool, id: UUID? = nil)
     /// Create an in-app editor tab (peer to terminal tabs). `fileURL` nil = an
-    /// empty editor (the worktree "open in Supacode" entry point).
-    case createEditorTab(Worktree, fileURL: URL? = nil, id: UUID? = nil)
+    /// empty editor (the worktree "open in Supacode" entry point). `line` (1-based,
+    /// optional) is a find-in-files jump target the editor scrolls to once loaded.
+    case createEditorTab(Worktree, fileURL: URL? = nil, line: Int? = nil, id: UUID? = nil)
     /// Mirror an editor tab's unsaved-changes state onto the tab's dirty
     /// indicator. Driven by `EditorFeature`'s `dirtyChanged` delegate.
     case setEditorTabDirty(Worktree, tabID: TerminalTabID, isDirty: Bool)
@@ -73,8 +74,9 @@ struct TerminalClient {
     case tabCreated(worktreeID: Worktree.ID)
     /// An editor tab was created in the worktree state. Parent spawns the
     /// matching `EditorFeature.State` in `TerminalsFeature.editorTabs` and
-    /// kicks off the file load.
-    case editorTabCreated(worktreeID: Worktree.ID, tabID: TerminalTabID, fileURL: URL?)
+    /// kicks off the file load. `line` (1-based, optional) is a find-in-files
+    /// jump target carried through so the editor scrolls to it after loading.
+    case editorTabCreated(worktreeID: Worktree.ID, tabID: TerminalTabID, fileURL: URL?, line: Int? = nil)
     case tabClosed(worktreeID: Worktree.ID)
     case focusChanged(worktreeID: Worktree.ID, surfaceID: UUID)
     case taskStatusChanged(worktreeID: Worktree.ID, status: WorktreeTaskStatus)

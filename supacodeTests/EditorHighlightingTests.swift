@@ -149,4 +149,20 @@ struct EditorHighlightingTests {
     #expect(EditorSymbol.symbols(in: Self.sampleSwift, language: nil).isEmpty)
     #expect(EditorSymbol.symbols(in: "", language: .swift).isEmpty)
   }
+
+  // MARK: - Open-at-line range computation (find-in-files scroll target).
+
+  @MainActor
+  @Test func startRangeForLineComputesUTF16Offset() {
+    let text = "line one\nline two\nline three"
+    // Line 1 starts at offset 0.
+    #expect(EditorHighlightModel.startRange(ofLine: 1, in: text) == NSRange(location: 0, length: 0))
+    // Line 2 starts right after the first "\n" ("line one\n" = 9 UTF-16 units).
+    #expect(EditorHighlightModel.startRange(ofLine: 2, in: text) == NSRange(location: 9, length: 0))
+    // Line 3 starts after the second "\n" (9 + "line two\n" = 18).
+    #expect(EditorHighlightModel.startRange(ofLine: 3, in: text) == NSRange(location: 18, length: 0))
+    // Out-of-bounds lines return nil.
+    #expect(EditorHighlightModel.startRange(ofLine: 4, in: text) == nil)
+    #expect(EditorHighlightModel.startRange(ofLine: 0, in: text) == nil)
+  }
 }

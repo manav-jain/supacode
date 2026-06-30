@@ -2105,7 +2105,7 @@ struct WorktreeTerminalManagerTests {
 
     var createdEditorTab: (TerminalTabID, URL?)?
     var tabCreatedCount = 0
-    state.onEditorTabCreated = { tabID, fileURL in createdEditorTab = (tabID, fileURL) }
+    state.onEditorTabCreated = { tabID, fileURL, _ in createdEditorTab = (tabID, fileURL) }
     state.onTabCreated = { tabCreatedCount += 1 }
 
     let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
@@ -2185,7 +2185,7 @@ struct WorktreeTerminalManagerTests {
     let state = manager.state(for: makeWorktree())
 
     var createdCount = 0
-    state.onEditorTabCreated = { _, _ in createdCount += 1 }
+    state.onEditorTabCreated = { _, _, _ in createdCount += 1 }
 
     let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
     let first = state.createEditorTab(fileURL: fileURL)
@@ -2620,7 +2620,7 @@ struct WorktreeTerminalManagerTests {
 
     let editorTabID = UUID()
     var openedEditorTabs: [(TerminalTabID, URL?)] = []
-    state.onEditorTabCreated = { tabID, fileURL in openedEditorTabs.append((tabID, fileURL)) }
+    state.onEditorTabCreated = { tabID, fileURL, _ in openedEditorTabs.append((tabID, fileURL)) }
 
     let snapshot = TerminalLayoutSnapshot(
       tabs: [

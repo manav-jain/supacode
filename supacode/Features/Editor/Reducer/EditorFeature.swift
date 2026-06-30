@@ -37,6 +37,11 @@ struct EditorFeature {
     /// silently reload (that would clobber their work). Drives the conflict
     /// banner in `EditorView`; cleared by resolving the conflict (Reload / Keep).
     var externallyModified: Bool
+    /// A 1-based line the view should scroll to once the buffer has loaded.
+    /// Seeded by a find-in-files open; the view watches it, reveals the line
+    /// after the load lands, then clears it via `scrollLineConsumed`. `nil` when
+    /// there's no pending jump.
+    var pendingScrollLine: Int?
 
     init(
       id: UUID = UUID(),
@@ -45,7 +50,8 @@ struct EditorFeature {
       isDirty: Bool = false,
       loadError: String? = nil,
       isLoading: Bool = false,
-      externallyModified: Bool = false
+      externallyModified: Bool = false,
+      pendingScrollLine: Int? = nil
     ) {
       self.id = id
       self.fileURL = fileURL
@@ -54,6 +60,7 @@ struct EditorFeature {
       self.loadError = loadError
       self.isLoading = isLoading
       self.externallyModified = externallyModified
+      self.pendingScrollLine = pendingScrollLine
     }
   }
 
@@ -61,6 +68,13 @@ struct EditorFeature {
     case binding(BindingAction<State>)
     /// Open `url`, kicking off an async read.
     case open(URL)
+    /// Open `url` and, once loaded, scroll to `line` (1-based). Used by
+    /// find-in-files to land the user on the matched line. Re-targeting an
+    /// already-open file just updates the pending scroll line and re-reveals.
+    case openAtLine(URL, line: Int)
+    /// The view consumed `pendingScrollLine` (it scrolled to it). Clears the
+    /// pending jump so a later body run doesn't re-scroll.
+    case scrollLineConsumed
     /// The text view edited the buffer. Marks the editor dirty.
     case textChanged(String)
     /// Async read succeeded with the file's contents.
@@ -150,6 +164,21 @@ struct EditorFeature {
           // A new file invalidates any pending auto-save for the old buffer.
           .cancel(id: CancelID.autoSave(editorID))
         )
+
+      case .openAtLine(let url, let line):
+        // Seed the pending scroll target so the view jumps to the line once the
+        // buffer is ready. If this is the same file already loaded, just update
+        // the target (no re-read) — the view's `pendingScrollLine` watcher fires
+        // the reveal. Otherwise fall through to `.open`'s load.
+        state.pendingScrollLine = max(1, line)
+        if state.fileURL == url, !state.isLoading, state.loadError == nil {
+          return .none
+        }
+        return .send(.open(url))
+
+      case .scrollLineConsumed:
+        state.pendingScrollLine = nil
+        return .none
 
       case .textChanged(let text):
         state.text = text

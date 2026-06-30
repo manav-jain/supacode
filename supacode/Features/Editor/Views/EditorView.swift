@@ -20,6 +20,38 @@ struct EditorView: View {
   @State private var isShowingSymbols = false
 
   var body: some View {
+    content
+      .onAppear {
+        highlightModel.setFileURL(store.fileURL)
+        highlightModel.scheduleHighlight(for: store.text)
+        revealPendingLineIfReady()
+      }
+      .onChange(of: store.fileURL) { _, newValue in
+        highlightModel.setFileURL(newValue)
+        highlightModel.scheduleHighlight(for: store.text)
+      }
+      .onChange(of: store.text) { _, newValue in
+        highlightModel.scheduleHighlight(for: newValue)
+        // The buffer just landed (load or external reload) — if a find-in-files
+        // open seeded a pending line, jump to it now that the text exists.
+        revealPendingLineIfReady()
+      }
+      .onChange(of: store.pendingScrollLine) { _, _ in
+        // A new jump target arrived (e.g. re-activating a match in an already-open
+        // file, where the text doesn't change). Reveal it immediately.
+        revealPendingLineIfReady()
+      }
+      .onChange(of: store.isLoading) { _, isLoading in
+        if !isLoading {
+          revealPendingLineIfReady()
+        }
+      }
+  }
+
+  /// The editor surface plus its hidden command buttons. Split out from `body`
+  /// so the lifecycle `onChange` chain doesn't push the body expression past the
+  /// type-checker's complexity budget.
+  private var content: some View {
     Group {
       if let loadError = store.loadError {
         errorState(message: loadError)
@@ -47,17 +79,18 @@ struct EditorView: View {
         .accessibilityHidden(true)
         .disabled(highlightModel.symbols.isEmpty)
     }
-    .onAppear {
-      highlightModel.setFileURL(store.fileURL)
-      highlightModel.scheduleHighlight(for: store.text)
+  }
+
+  /// Scroll to `store.pendingScrollLine` once the buffer is loaded, then clear
+  /// the pending jump. No-ops when there's nothing pending or the file is still
+  /// loading. Reuses `EditorHighlightModel.revealLine`, which drives the same
+  /// `scrollRangeToVisible` path as Go-to-Symbol (Phase 5b).
+  private func revealPendingLineIfReady() {
+    guard let line = store.pendingScrollLine, !store.isLoading, store.loadError == nil else { return }
+    if let range = highlightModel.revealLine(line, in: store.text) {
+      selection = range
     }
-    .onChange(of: store.fileURL) { _, newValue in
-      highlightModel.setFileURL(newValue)
-      highlightModel.scheduleHighlight(for: store.text)
-    }
-    .onChange(of: store.text) { _, newValue in
-      highlightModel.scheduleHighlight(for: newValue)
-    }
+    store.send(.scrollLineConsumed)
   }
 
   private var editor: some View {
