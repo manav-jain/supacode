@@ -5,11 +5,19 @@ import SwiftUI
 
 /// The in-app editor surface. Wraps STTextView's SwiftUI `TextView` (2.3.10),
 /// which binds an `AttributedString`; we bridge that to the feature's plain
-/// `String` buffer. v1 is plain monospaced editing with system colors — NO
-/// syntax highlighting (Phase 5). Shows an inline empty state when no file is
-/// bound and an error state when a load fails.
+/// `String` buffer and layer tree-sitter syntax highlighting on top (Phase 5b).
+///
+/// Highlighting + symbol extraction run in `EditorHighlightModel`, a non-TCA
+/// `@Observable` coordinator owned by the view: it parses the buffer with
+/// tree-sitter (Swift today; the language registry is extensible), colors the
+/// bound `AttributedString`, and exposes the file's declarations for the
+/// Go-to-Symbol picker (⇧⌘O). Shows an inline empty state when no file is bound
+/// and an error state when a load fails.
 struct EditorView: View {
   @Bindable var store: StoreOf<EditorFeature>
+  @State private var highlightModel = EditorHighlightModel()
+  @State private var selection: NSRange?
+  @State private var isShowingSymbols = false
 
   var body: some View {
     Group {
@@ -31,16 +39,56 @@ struct EditorView: View {
         .opacity(0)
         .accessibilityHidden(true)
     }
+    // ⇧⌘O — Go to Symbol.
+    .background {
+      Button("Go to Symbol") { isShowingSymbols = true }
+        .keyboardShortcut("o", modifiers: [.command, .shift])
+        .opacity(0)
+        .accessibilityHidden(true)
+        .disabled(highlightModel.symbols.isEmpty)
+    }
+    .onAppear {
+      highlightModel.setFileURL(store.fileURL)
+      highlightModel.scheduleHighlight(for: store.text)
+    }
+    .onChange(of: store.fileURL) { _, newValue in
+      highlightModel.setFileURL(newValue)
+      highlightModel.scheduleHighlight(for: store.text)
+    }
+    .onChange(of: store.text) { _, newValue in
+      highlightModel.scheduleHighlight(for: newValue)
+    }
   }
 
   private var editor: some View {
-    TextView(
-      text: textBinding,
-      selection: .constant(nil),
-      options: [.wrapLines, .highlightSelectedLine]
-    )
-    .textViewFont(.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular))
-    .disabled(store.isLoading)
+    // Reading `styleGeneration` here ties the body to highlight completions so
+    // the colored attributed string is re-read once tree-sitter finishes.
+    _ = highlightModel.styleGeneration
+    return
+      TextView(
+        text: textBinding,
+        selection: $selection,
+        options: [.wrapLines, .highlightSelectedLine],
+        plugins: [highlightModel.scrollPlugin]
+      )
+      .textViewFont(highlightModel.font)
+      .disabled(store.isLoading)
+      .overlay(alignment: .top) {
+        symbolPicker
+      }
+  }
+
+  @ViewBuilder private var symbolPicker: some View {
+    if isShowingSymbols {
+      GoToSymbolView(symbols: highlightModel.symbols) { symbol in
+        isShowingSymbols = false
+        selection = symbol.range
+        highlightModel.reveal(symbol)
+      } onDismiss: {
+        isShowingSymbols = false
+      }
+      .padding(.top, 8)
+    }
   }
 
   private var emptyState: some View {
@@ -60,12 +108,13 @@ struct EditorView: View {
   }
 
   /// Bridges the feature's plain `String` buffer to STTextView's
-  /// `AttributedString` binding. Reads convert `String` → `AttributedString`;
-  /// writes extract the characters and send `.textChanged` (no direct state
-  /// mutation, per the `store_state_mutation_in_views` lint rule).
+  /// `AttributedString` binding. Reads produce the syntax-colored string from
+  /// `EditorHighlightModel`; writes extract the characters and send
+  /// `.textChanged` (no direct state mutation, per the
+  /// `store_state_mutation_in_views` lint rule).
   private var textBinding: Binding<AttributedString> {
     Binding(
-      get: { AttributedString(store.text) },
+      get: { highlightModel.styledString(for: store.text) },
       set: { newValue in
         let plain = String(newValue.characters)
         guard plain != store.text else { return }
