@@ -2178,6 +2178,76 @@ struct WorktreeTerminalManagerTests {
     #expect(state.tabManager.tabs.first { $0.id == terminalTabID }?.isDirty == false)
   }
 
+  // MARK: - Editor tab open-file dedup.
+
+  @Test func createEditorTabDedupsSameFileToOneTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    var createdCount = 0
+    state.onEditorTabCreated = { _, _ in createdCount += 1 }
+
+    let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
+    let first = state.createEditorTab(fileURL: fileURL)
+    let second = state.createEditorTab(fileURL: fileURL)
+
+    // The second open focuses the first tab rather than creating a duplicate.
+    #expect(first == second)
+    #expect(state.tabManager.tabs.filter { $0.kind == .editor }.count == 1)
+    #expect(createdCount == 1)
+    #expect(state.tabManager.selectedTabId == first)
+  }
+
+  @Test func createEditorTabDedupsAcrossEquivalentPaths() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    let first = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/a.swift"))
+    // A trivially different spelling of the same path collapses to one tab.
+    let second = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/./a.swift"))
+
+    #expect(first == second)
+    #expect(state.tabManager.tabs.filter { $0.kind == .editor }.count == 1)
+  }
+
+  @Test func createEditorTabDistinctFilesYieldDistinctTabs() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    let first = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/a.swift"))
+    let second = state.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/b.swift"))
+
+    #expect(first != second)
+    #expect(state.tabManager.tabs.filter { $0.kind == .editor }.count == 2)
+  }
+
+  @Test func createEditorTabWithNilFileAlwaysAddsNewTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    // An empty editor (nil fileURL) never dedups — each call adds a new tab.
+    let first = state.createEditorTab(fileURL: nil)
+    let second = state.createEditorTab(fileURL: nil)
+
+    #expect(first != second)
+    #expect(state.tabManager.tabs.filter { $0.kind == .editor }.count == 2)
+  }
+
+  @Test func closingEditorTabAllowsReopenAsNewTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+
+    let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
+    let first = state.createEditorTab(fileURL: fileURL)
+    state.closeTab(first)
+    // After closing, the dedup map no longer tracks the file, so a fresh open
+    // makes a new tab rather than focusing the gone one.
+    let second = state.createEditorTab(fileURL: fileURL)
+
+    #expect(first != second)
+    #expect(state.tabManager.tabs.filter { $0.kind == .editor }.count == 1)
+  }
+
   private func makeWorktree(id: String = "/tmp/repo/wt-1") -> Worktree {
     let name = URL(fileURLWithPath: id).lastPathComponent
     return Worktree(
@@ -2497,6 +2567,125 @@ struct WorktreeTerminalManagerTests {
     // and would have landed on tabC after `restoreFromSnapshot` clamping.
     #expect(snapshot.tabs.count == 2)
     #expect(snapshot.tabs[snapshot.selectedTabIndex].id == tabA.rawValue)
+  }
+
+  @Test func captureLayoutSnapshotIncludesEditorTabsWithFileAndOrder() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+
+    // A terminal tab followed by an editor tab. The editor tab must be captured
+    // with its kind + file path, alongside the terminal tab, preserving order.
+    guard let terminalTabID = state.createTab(focusing: false) else {
+      Issue.record("Expected a terminal tab")
+      return
+    }
+    let fileURL = URL(filePath: "/tmp/repo/wt-1/main.swift")
+    let editorTabID = state.createEditorTab(fileURL: fileURL, focusing: true)
+
+    guard let snapshot = state.captureLayoutSnapshot() else {
+      Issue.record("Expected non-nil snapshot")
+      return
+    }
+    #expect(snapshot.tabs.count == 2)
+    #expect(snapshot.tabs[0].id == terminalTabID.rawValue)
+    #expect(snapshot.tabs[0].kind == .terminal)
+    #expect(snapshot.tabs[1].id == editorTabID.rawValue)
+    #expect(snapshot.tabs[1].kind == .editor)
+    #expect(snapshot.tabs[1].editorFile == "/tmp/repo/wt-1/main.swift")
+    #expect(snapshot.tabs[1].layout == nil)
+    // The editor tab was focused last, so it's the selected one.
+    #expect(snapshot.tabs[snapshot.selectedTabIndex].id == editorTabID.rawValue)
+  }
+
+  @Test func captureLayoutSnapshotEmptyEditorTabHasNilFile() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    _ = state.createTab(focusing: false)
+    _ = state.createEditorTab(fileURL: nil, focusing: false)
+
+    guard let snapshot = state.captureLayoutSnapshot() else {
+      Issue.record("Expected non-nil snapshot")
+      return
+    }
+    let editorTab = snapshot.tabs.first { $0.kind == .editor }
+    #expect(editorTab != nil)
+    #expect(editorTab?.editorFile == nil)
+  }
+
+  @Test func restoreFromSnapshotRecreatesEditorTabsViaCreateEditorTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+
+    let editorTabID = UUID()
+    var openedEditorTabs: [(TerminalTabID, URL?)] = []
+    state.onEditorTabCreated = { tabID, fileURL in openedEditorTabs.append((tabID, fileURL)) }
+
+    let snapshot = TerminalLayoutSnapshot(
+      tabs: [
+        TerminalLayoutSnapshot.TabSnapshot(
+          id: UUID(),
+          title: "Terminal 1",
+          customTitle: nil,
+          icon: nil,
+          tintColor: nil,
+          layout: .leaf(TerminalLayoutSnapshot.SurfaceSnapshot(id: nil, workingDirectory: "/tmp/repo/wt-1")),
+          focusedLeafIndex: 0
+        ),
+        TerminalLayoutSnapshot.TabSnapshot(
+          id: editorTabID,
+          title: "main.swift",
+          customTitle: "my-editor",
+          icon: "doc.text",
+          tintColor: nil,
+          layout: nil,
+          focusedLeafIndex: 0,
+          kind: .editor,
+          editorFile: "/tmp/repo/wt-1/main.swift"
+        ),
+      ],
+      selectedTabIndex: 1
+    )
+    state.pendingLayoutSnapshot = snapshot
+    state.ensureInitialTab(focusing: false)
+
+    // Both tabs restore, in order, with the editor tab recreated via the editor
+    // path (no surface). The custom title carries over and the editor tab is selected.
+    #expect(state.tabManager.tabs.count == 2)
+    #expect(state.tabManager.tabs[0].kind == .terminal)
+    #expect(state.tabManager.tabs[1].kind == .editor)
+    #expect(state.tabManager.tabs[1].id.rawValue == editorTabID)
+    #expect(state.tabManager.tabs[1].displayTitle == "my-editor")
+    #expect(state.isEditorTab(state.tabManager.tabs[1].id))
+    #expect(state.tabManager.selectedTabId?.rawValue == editorTabID)
+    // The editor restore re-opens the file through the createEditorTab seam.
+    #expect(openedEditorTabs.contains { $0.0.rawValue == editorTabID && $0.1?.path == "/tmp/repo/wt-1/main.swift" })
+  }
+
+  @Test func restoreFromSnapshotEditorTabRoundTripsCaptureToRestore() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let source = manager.state(for: worktree)
+
+    _ = source.createTab(focusing: false)
+    _ = source.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/a.swift"), focusing: false)
+    _ = source.createEditorTab(fileURL: URL(filePath: "/tmp/repo/wt-1/b.swift"), focusing: true)
+    guard let captured = source.captureLayoutSnapshot() else {
+      Issue.record("Expected non-nil snapshot")
+      return
+    }
+
+    // Restore into a fresh worktree state and confirm tabs + order + selection.
+    let restoredManager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let restored = restoredManager.state(for: makeWorktree(id: "/tmp/repo/wt-2"))
+    restored.pendingLayoutSnapshot = captured
+    restored.ensureInitialTab(focusing: false)
+
+    #expect(restored.tabManager.tabs.map(\.kind) == [.terminal, .editor, .editor])
+    #expect(restored.tabManager.tabs[1].title == "a.swift")
+    #expect(restored.tabManager.tabs[2].title == "b.swift")
+    #expect(restored.captureLayoutSnapshot()?.tabs.map(\.editorFile) == captured.tabs.map(\.editorFile))
   }
 
   @Test func performSplitActionRefusesNewSplitOnBlockingScriptTab() {

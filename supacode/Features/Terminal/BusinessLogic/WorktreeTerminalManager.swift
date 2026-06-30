@@ -495,6 +495,9 @@ final class WorktreeTerminalManager {
     }
     state.onEditorTabCreated = { [weak self] tabID, fileURL in
       self?.emit(.editorTabCreated(worktreeID: worktree.id, tabID: tabID, fileURL: fileURL))
+      // Editor tabs now persist in the layout snapshot, so a new editor tab
+      // must dirty the layout the same way a new terminal tab does.
+      self?.markLayoutDirty(worktreeID: worktree.id)
     }
     state.onTabClosed = { [weak self] in
       self?.emit(.tabClosed(worktreeID: worktree.id))

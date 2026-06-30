@@ -72,6 +72,11 @@ final class WorktreeTerminalState {
   @ObservationIgnored private var pendingExplicitSurfaceCloseIDs: Set<UUID> = []
   @ObservationIgnored private var surfaceGenerationByTab: [TerminalTabID: Int] = [:]
   @ObservationIgnored private var focusedSurfaceIdByTab: [TerminalTabID: UUID] = [:]
+  /// File URL bound to each `.editor` tab. `EditorFeature.State.fileURL` is the
+  /// canonical copy in the TCA layer, but it isn't reachable from here, so we
+  /// mirror it (standardized) at the seam where editor tabs are born — this is
+  /// what open-file dedup matches against and what the layout snapshot captures.
+  @ObservationIgnored private var editorFileURLByTab: [TerminalTabID: URL] = [:]
   /// Per-tab projection cache. `WorktreeTerminalState` recomputes from `trees`
   /// / `notifications` / `focusedSurfaceIdByTab`, compares to the cached value,
   /// and fires `onTabProjectionChanged` only on diff. The manager forwards the
@@ -350,6 +355,18 @@ final class WorktreeTerminalState {
     tabID: UUID? = nil,
     focusing: Bool = true
   ) -> TerminalTabID {
+    // Open-file dedup: a request for a file already open in an editor tab here
+    // focuses that tab instead of duplicating it. Compared on the standardized
+    // URL so `/a/./b` and `/a/b` resolve to the same tab. An empty editor
+    // (nil fileURL) always creates a new tab.
+    if let fileURL,
+      let existingTabID = editorTabID(forFileURL: fileURL)
+    {
+      if focusing {
+        selectTab(existingTabID)
+      }
+      return existingTabID
+    }
     let title = fileURL?.lastPathComponent ?? "Untitled"
     let createdTabID = tabManager.createTab(
       title: title,
@@ -358,6 +375,9 @@ final class WorktreeTerminalState {
       kind: .editor,
       id: tabID,
     )
+    if let fileURL {
+      editorFileURLByTab[createdTabID] = fileURL.standardizedFileURL
+    }
     updateShouldHideTabBar()
     onEditorTabCreated?(createdTabID, fileURL)
     onTabCreated?()
@@ -365,6 +385,15 @@ final class WorktreeTerminalState {
       tabManager.selectTab(createdTabID)
     }
     return createdTabID
+  }
+
+  /// The editor tab currently bound to `fileURL`, or nil. Match is on the
+  /// standardized URL so trivially-different spellings of the same path collapse
+  /// to one tab. Only `.editor` tabs are tracked, so this never matches a
+  /// terminal tab.
+  func editorTabID(forFileURL fileURL: URL) -> TerminalTabID? {
+    let target = fileURL.standardizedFileURL
+    return editorFileURLByTab.first(where: { $0.value == target })?.key
   }
 
   /// True when the tab is an in-app editor tab (no split tree / surface).
@@ -777,6 +806,7 @@ final class WorktreeTerminalState {
       lastBlockingScriptTabByKind.removeValue(forKey: kind)
     }
     if isEditor {
+      editorFileURLByTab.removeValue(forKey: tabId)
       onTabRemoved?(tabId)
     } else {
       removeTree(for: tabId)
@@ -1003,6 +1033,7 @@ final class WorktreeTerminalState {
     trees.removeAll()
     surfaceGenerationByTab.removeAll()
     focusedSurfaceIdByTab.removeAll()
+    editorFileURLByTab.removeAll()
     onSurfacesClosed?(Set(closingSurfaceIDs))
     let pendingKinds = Set(blockingScripts.values)
     blockingScripts.removeAll()
@@ -1119,8 +1150,25 @@ final class WorktreeTerminalState {
     for tab in tabManager.tabs {
       // Blocking-script tabs die with the app; persisting them would resurrect a dead session.
       if tab.isBlockingScript { continue }
-      // Editor tabs own no split tree; layout restore is terminal-only in this phase.
-      if tab.kind == .editor { continue }
+      // Editor tabs own no split tree: persist the bound file + title so the tab
+      // (and its file) restores on relaunch. A missing file restores as an editor
+      // tab showing the load-error state rather than being dropped.
+      if tab.kind == .editor {
+        tabSnapshots.append(
+          TerminalLayoutSnapshot.TabSnapshot(
+            id: tab.id.rawValue,
+            title: tab.title,
+            customTitle: tab.customTitle,
+            icon: tab.icon,
+            tintColor: tab.tintColor,
+            layout: nil,
+            focusedLeafIndex: 0,
+            kind: .editor,
+            editorFile: editorFileURLByTab[tab.id]?.path(percentEncoded: false),
+          )
+        )
+        continue
+      }
       guard let tree = trees[tab.id], let root = tree.root else {
         layoutLogger.warning("Skipping tab \(tab.id.rawValue) during snapshot capture (no tree)")
         continue
@@ -1209,7 +1257,28 @@ final class WorktreeTerminalState {
     pendingSetupScript = false
 
     for (index, tabSnapshot) in snapshot.tabs.enumerated() {
-      let firstLeafPwd = tabSnapshot.layout.firstLeaf.workingDirectory
+      // Editor tabs own no split tree: recreate via `createEditorTab` (which
+      // re-opens the file through the TCA layer). A nil / missing file restores
+      // as an editor tab — `createEditorTab(nil)` is the empty editor, and a
+      // file that no longer exists surfaces EditorFeature's load-error state.
+      if tabSnapshot.kind == .editor {
+        let fileURL = tabSnapshot.editorFile.map { URL(filePath: $0) }
+        let editorTabID = createEditorTab(
+          fileURL: fileURL,
+          tabID: tabSnapshot.id,
+          focusing: false,
+        )
+        if let customTitle = tabSnapshot.customTitle {
+          tabManager.setCustomTitle(editorTabID, title: customTitle)
+        }
+        continue
+      }
+      // A terminal tab always carries a layout; a missing one is corrupt — skip it.
+      guard let layout = tabSnapshot.layout else {
+        layoutLogger.warning("Skipping terminal tab \(tabSnapshot.id?.uuidString ?? "<none>") with no layout")
+        continue
+      }
+      let firstLeafPwd = layout.firstLeaf.workingDirectory
       let workingDir = firstLeafPwd.flatMap { URL(filePath: $0, directoryHint: .isDirectory) }
       let context: ghostty_surface_context_e =
         index == 0 ? GHOSTTY_SURFACE_CONTEXT_WINDOW : GHOSTTY_SURFACE_CONTEXT_TAB
@@ -1229,18 +1298,18 @@ final class WorktreeTerminalState {
         workingDirectoryOverride: workingDir,
         inheritingFromSurfaceId: nil,
         context: context,
-        surfaceID: tabSnapshot.layout.firstLeaf.id,
+        surfaceID: layout.firstLeaf.id,
       )
       let tree = SplitTree(view: surface)
       setTree(tree, for: tabId)
       setFocusedSurface(surface.id, for: tabId)
 
       // Recursively restore splits.
-      restoreLayoutNode(tabSnapshot.layout, anchor: surface, tabId: tabId)
+      restoreLayoutNode(layout, anchor: surface, tabId: tabId)
 
       // Log if partial restoration produced fewer panes than expected.
       let leaves = trees[tabId]?.root?.leaves() ?? []
-      let expectedLeaves = tabSnapshot.layout.leafCount
+      let expectedLeaves = layout.leafCount
       if leaves.count != expectedLeaves {
         layoutLogger.warning(
           "Partial restore for tab '\(tabSnapshot.title)': expected \(expectedLeaves) panes, got \(leaves.count)"
