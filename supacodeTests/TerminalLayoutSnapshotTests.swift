@@ -173,8 +173,8 @@ struct TerminalLayoutSnapshotTests {
     let data = try JSONEncoder().encode(snapshot)
     let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: data)
     #expect(decoded.tabs.count == 1)
-    #expect(decoded.tabs[0].layout.firstLeaf.workingDirectory == "/home")
-    #expect(decoded.tabs[0].layout.leafCount == 1)
+    #expect(decoded.tabs[0].layout?.firstLeaf.workingDirectory == "/home")
+    #expect(decoded.tabs[0].layout?.leafCount == 1)
   }
 
   @Test func allSurfaceIDsCollectsLeavesAcrossTabsAndSplits() {
@@ -256,7 +256,7 @@ struct TerminalLayoutSnapshotTests {
     let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: data)
 
     #expect(decoded == snapshot)
-    let leaf = decoded.tabs[0].layout.firstLeaf
+    let leaf = try #require(decoded.tabs[0].layout).firstLeaf
     #expect(leaf.agents?.count == 2)
     #expect(leaf.agents?[0].pids == [12345, 67890])
     #expect(leaf.agents?[1].activity == "idle")
@@ -285,7 +285,7 @@ struct TerminalLayoutSnapshotTests {
       TerminalLayoutSnapshot.self,
       from: Data(json.utf8)
     )
-    let leaf = decoded.tabs[0].layout.firstLeaf
+    let leaf = try #require(decoded.tabs[0].layout).firstLeaf
     #expect(leaf.agents == nil)
     #expect(leaf.id == UUID(uuidString: "00000000-0000-0000-0000-000000000002"))
   }
@@ -318,7 +318,7 @@ struct TerminalLayoutSnapshotTests {
       TerminalLayoutSnapshot.self,
       from: Data(json.utf8)
     )
-    let leaf = decoded.tabs[0].layout.firstLeaf
+    let leaf = try #require(decoded.tabs[0].layout).firstLeaf
     #expect(leaf.agents == nil)
   }
 
@@ -392,5 +392,132 @@ struct TerminalLayoutSnapshotTests {
     )
 
     #expect(snapshot.allSurfaceIDs == [real])
+  }
+
+  // MARK: - Editor tabs.
+
+  @Test func editorTabRoundTripsKindAndFileAndOrderAndSelection() throws {
+    // A worktree with a terminal tab + two editor tabs must round-trip the
+    // editor file paths, the tab order, and the selected index.
+    let terminalSurface = UUID()
+    let snapshot = TerminalLayoutSnapshot(
+      tabs: [
+        TerminalLayoutSnapshot.TabSnapshot(
+          id: UUID(),
+          title: "term 1",
+          customTitle: nil,
+          icon: "terminal",
+          tintColor: nil,
+          layout: .leaf(TerminalLayoutSnapshot.SurfaceSnapshot(id: terminalSurface, workingDirectory: "/repo")),
+          focusedLeafIndex: 0
+        ),
+        TerminalLayoutSnapshot.TabSnapshot(
+          id: UUID(),
+          title: "a.swift",
+          customTitle: nil,
+          icon: "doc.text",
+          tintColor: nil,
+          layout: nil,
+          focusedLeafIndex: 0,
+          kind: .editor,
+          editorFile: "/repo/a.swift"
+        ),
+        TerminalLayoutSnapshot.TabSnapshot(
+          id: UUID(),
+          title: "b.swift",
+          customTitle: "renamed",
+          icon: "doc.text",
+          tintColor: nil,
+          layout: nil,
+          focusedLeafIndex: 0,
+          kind: .editor,
+          editorFile: "/repo/b.swift"
+        ),
+      ],
+      selectedTabIndex: 2
+    )
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try encoder.encode(snapshot)
+    let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: data)
+
+    #expect(decoded == snapshot)
+    #expect(decoded.selectedTabIndex == 2)
+    #expect(decoded.tabs.map(\.kind) == [.terminal, .editor, .editor])
+    #expect(decoded.tabs.map(\.editorFile) == [nil, "/repo/a.swift", "/repo/b.swift"])
+    #expect(decoded.tabs[1].layout == nil)
+    #expect(decoded.tabs[2].customTitle == "renamed")
+    // Editor tabs own no surfaces, so only the terminal tab contributes a surface ID.
+    #expect(decoded.allSurfaceIDs == [terminalSurface])
+  }
+
+  @Test func legacySnapshotWithoutKindDecodesAsTerminal() throws {
+    // Snapshots written before editor tabs existed have no `kind` / `editorFile`
+    // field; those must decode as terminal tabs without throwing.
+    let json = #"""
+      {
+        "tabs": [
+          {
+            "id": null,
+            "title": "tab",
+            "customTitle": null,
+            "icon": null,
+            "tintColor": null,
+            "layout": {"leaf": {"_0": {"id": null, "workingDirectory": "/home"}}},
+            "focusedLeafIndex": 0
+          }
+        ],
+        "selectedTabIndex": 0
+      }
+      """#
+    let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: Data(json.utf8))
+    #expect(decoded.tabs.first?.kind == .terminal)
+    #expect(decoded.tabs.first?.editorFile == nil)
+    #expect(decoded.tabs.first?.layout?.firstLeaf.workingDirectory == "/home")
+  }
+
+  @Test func unknownKindRawValueDecodesAsTerminal() throws {
+    // A future kind this build doesn't recognize must not strand the tab; it
+    // falls back to `.terminal` (the `try?` on the kind decode).
+    let json = #"""
+      {
+        "tabs": [
+          {
+            "id": null,
+            "title": "tab",
+            "kind": "diff-viewer",
+            "layout": {"leaf": {"_0": {"id": null, "workingDirectory": "/home"}}},
+            "focusedLeafIndex": 0
+          }
+        ],
+        "selectedTabIndex": 0
+      }
+      """#
+    let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: Data(json.utf8))
+    #expect(decoded.tabs.first?.kind == .terminal)
+  }
+
+  @Test func editorTabDecodesWithoutLayoutField() throws {
+    // An editor tab persists no `layout`. Decoding one with only `kind` /
+    // `editorFile` must succeed with a nil layout.
+    let json = #"""
+      {
+        "tabs": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "title": "a.swift",
+            "kind": "editor",
+            "editorFile": "/repo/a.swift",
+            "focusedLeafIndex": 0
+          }
+        ],
+        "selectedTabIndex": 0
+      }
+      """#
+    let decoded = try JSONDecoder().decode(TerminalLayoutSnapshot.self, from: Data(json.utf8))
+    #expect(decoded.tabs.first?.kind == .editor)
+    #expect(decoded.tabs.first?.layout == nil)
+    #expect(decoded.tabs.first?.editorFile == "/repo/a.swift")
   }
 }

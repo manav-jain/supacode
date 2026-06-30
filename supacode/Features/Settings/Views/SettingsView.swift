@@ -134,6 +134,8 @@ private struct SettingsSidebarView: View {
         .tag(SettingsSection.worktree)
       Label("Developer", systemImage: "hammer")
         .tag(SettingsSection.developer)
+      Label("Feature Flags", systemImage: "switch.2")
+        .tag(SettingsSection.featureFlags)
       Label("GitHub", image: "github-mark")
         .tag(SettingsSection.github)
       Label("Shortcuts", systemImage: "keyboard")
@@ -192,6 +194,8 @@ private struct SettingsDetailView: View {
       WorktreeSettingsView(store: settingsStore)
     case .developer:
       DeveloperSettingsView(store: settingsStore)
+    case .featureFlags:
+      FeatureFlagsSettingsView()
     case .shortcuts:
       KeyboardShortcutsSettingsView(store: settingsStore)
     case .updates:

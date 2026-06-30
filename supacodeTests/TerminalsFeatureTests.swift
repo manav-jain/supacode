@@ -164,4 +164,92 @@ struct TerminalsFeatureTests {
     }
     await store.receive(\.terminalTabs)
   }
+
+  // MARK: - Editor tabs.
+
+  @Test func editorTabOpenedAddsEditorStateAndKicksOffLoad() async {
+    let tabID = TerminalTabID(rawValue: UUID())
+    let fileURL = URL(filePath: "/tmp/repo/file.swift")
+    let store = TestStore(initialState: TerminalsFeature.State()) {
+      TerminalsFeature()
+    } withDependencies: {
+      $0.editorFileClient.read = { _ in "let x = 1\n" }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .editorTabOpened(worktreeID: "/tmp/repo", tabID: tabID, fileURL: fileURL)
+    ) {
+      $0.editorTabs.append(EditorFeature.State(id: tabID.rawValue, fileURL: fileURL))
+      $0.editorTabWorktreeIDs[tabID] = "/tmp/repo"
+    }
+    // Forwards `.open(fileURL)` into the scoped editor reducer, which loads.
+    await store.receive(\.editorTabs)
+    #expect(store.state.editorTabs[id: tabID.rawValue]?.fileURL == fileURL)
+  }
+
+  @Test func editorTabOpenedWithNilFileURLAddsEmptyEditorWithoutLoad() async {
+    let tabID = TerminalTabID(rawValue: UUID())
+    let store = TestStore(initialState: TerminalsFeature.State()) { TerminalsFeature() }
+
+    // No `.open` is forwarded for a nil fileURL, so the exhaustive store needs
+    // no `receive`.
+    await store.send(
+      .editorTabOpened(worktreeID: "/tmp/repo", tabID: tabID, fileURL: nil)
+    ) {
+      $0.editorTabs.append(EditorFeature.State(id: tabID.rawValue, fileURL: nil))
+      $0.editorTabWorktreeIDs[tabID] = "/tmp/repo"
+    }
+  }
+
+  @Test func tabRemovedDropsEditorTabAndWorktreeMapping() async {
+    let tabID = TerminalTabID(rawValue: UUID())
+    var initial = TerminalsFeature.State()
+    initial.editorTabs.append(EditorFeature.State(id: tabID.rawValue, fileURL: nil))
+    initial.editorTabWorktreeIDs[tabID] = "/tmp/repo"
+    let store = TestStore(initialState: initial) { TerminalsFeature() }
+
+    await store.send(.tabRemoved(worktreeID: "/tmp/repo", tabID: tabID)) {
+      $0.editorTabs.remove(id: tabID.rawValue)
+      $0.editorTabWorktreeIDs.removeValue(forKey: tabID)
+      $0.recentlyRemovedTabIDs = [
+        TerminalsFeature.RecentlyRemovedTab(worktreeID: "/tmp/repo", tabID: tabID)
+      ]
+    }
+  }
+
+  @Test func worktreeStateTornDownDropsEditorTabsForThatWorktree() async {
+    let editorA = TerminalTabID(rawValue: UUID())
+    let editorB = TerminalTabID(rawValue: UUID())
+    var initial = TerminalsFeature.State()
+    initial.editorTabs.append(EditorFeature.State(id: editorA.rawValue, fileURL: nil))
+    initial.editorTabs.append(EditorFeature.State(id: editorB.rawValue, fileURL: nil))
+    initial.editorTabWorktreeIDs[editorA] = "/tmp/repoA"
+    initial.editorTabWorktreeIDs[editorB] = "/tmp/repoB"
+    let store = TestStore(initialState: initial) { TerminalsFeature() }
+
+    await store.send(.worktreeStateTornDown(worktreeID: "/tmp/repoA")) {
+      $0.editorTabs.remove(id: editorA.rawValue)
+      $0.editorTabWorktreeIDs.removeValue(forKey: editorA)
+    }
+    #expect(store.state.editorTabs[id: editorB.rawValue] != nil)
+    #expect(store.state.editorTabWorktreeIDs[editorB] == "/tmp/repoB")
+  }
+
+  @Test func staleEditorTabOpenedAfterRemoveDoesNotReinsert() async {
+    let tabID = TerminalTabID(rawValue: UUID())
+    var initial = TerminalsFeature.State()
+    initial.editorTabs.append(EditorFeature.State(id: tabID.rawValue, fileURL: nil))
+    initial.editorTabWorktreeIDs[tabID] = "/tmp/repo"
+    let store = TestStore(initialState: initial) { TerminalsFeature() }
+    store.exhaustivity = .off
+
+    await store.send(.tabRemoved(worktreeID: "/tmp/repo", tabID: tabID))
+    // A late editor-open replay for a removed tab in the same worktree must not
+    // resurrect the editor state.
+    await store.send(
+      .editorTabOpened(worktreeID: "/tmp/repo", tabID: tabID, fileURL: nil)
+    )
+    #expect(store.state.editorTabs.isEmpty)
+  }
 }

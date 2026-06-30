@@ -23,6 +23,7 @@ final class TerminalTabManager {
     isTitleLocked: Bool = false,
     tintColor: RepositoryColor? = nil,
     isBlockingScript: Bool = false,
+    kind: TerminalTabKind = .terminal,
     id: UUID? = nil
   ) -> TerminalTabID {
     let tabID: TerminalTabID
@@ -43,7 +44,8 @@ final class TerminalTabManager {
       icon: icon,
       isTitleLocked: isTitleLocked,
       tintColor: tintColor,
-      isBlockingScript: isBlockingScript
+      isBlockingScript: isBlockingScript,
+      kind: kind
     )
     if let selectedTabId,
       let selectedIndex = tabs.firstIndex(where: { $0.id == selectedTabId })
@@ -79,6 +81,12 @@ final class TerminalTabManager {
 
   func isBlockingScript(_ id: TerminalTabID) -> Bool {
     tabs.first(where: { $0.id == id })?.isBlockingScript == true
+  }
+
+  /// Tab kind, defaulting to `.terminal` for an unknown id so callers branching
+  /// on this never accidentally treat a missing tab as an editor.
+  func kind(_ id: TerminalTabID) -> TerminalTabKind {
+    tabs.first(where: { $0.id == id })?.kind ?? .terminal
   }
 
   /// Mark a blocking-script tab as completed. Title / icon / lock survive so

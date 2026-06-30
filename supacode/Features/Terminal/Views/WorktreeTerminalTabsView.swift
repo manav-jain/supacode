@@ -59,12 +59,21 @@ struct WorktreeTerminalTabsView: View {
       }
       if let selectedId = state.tabManager.selectedTabId {
         TerminalTabContentStack(tabs: state.tabManager.tabs, selectedTabId: selectedId) { tabId in
-          TerminalSplitTreePane(
-            tabId: tabId,
-            terminalState: state,
-            terminalsStore: terminalsStore,
-            unfocusedSplitOverlay: unfocusedSplitOverlay
-          )
+          if state.isEditorTab(tabId),
+            let editorStore = terminalsStore.scope(
+              state: \.editorTabs[id: tabId.rawValue],
+              action: \.editorTabs[id: tabId.rawValue]
+            )
+          {
+            EditorView(store: editorStore)
+          } else {
+            TerminalSplitTreePane(
+              tabId: tabId,
+              terminalState: state,
+              terminalsStore: terminalsStore,
+              unfocusedSplitOverlay: unfocusedSplitOverlay
+            )
+          }
         }
       } else {
         EmptyTerminalPaneView(message: "No terminals open")

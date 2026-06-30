@@ -5,14 +5,30 @@ struct TerminalLayoutSnapshot: Codable, Equatable, Sendable {
   let tabs: [TabSnapshot]
   let selectedTabIndex: Int
 
+  /// Persisted tab kind. Stored as a String rawValue (not the in-memory
+  /// `TerminalTabKind`) so a future kind doesn't break decode and an unknown
+  /// value falls back to `.terminal`. Mirrors the on-disk forward-compat
+  /// posture of `tintColor` / `agents`.
+  enum TabKind: String, Codable, Equatable, Sendable {
+    case terminal
+    case editor
+  }
+
   struct TabSnapshot: Codable, Equatable, Sendable {
     let id: UUID?
     let title: String
     let customTitle: String?
     let icon: String?
     let tintColor: RepositoryColor?
-    let layout: LayoutNode
+    /// The split-tree layout for a terminal tab. Nil for an editor tab, which
+    /// owns no surfaces. A terminal tab always carries one.
+    let layout: LayoutNode?
     let focusedLeafIndex: Int
+    /// Terminal vs editor. Absent on legacy snapshots → `.terminal`.
+    let kind: TabKind
+    /// The file open in an editor tab, as a filesystem path. Nil for an empty
+    /// editor (no file) and for terminal tabs. Restored via `createEditorTab`.
+    let editorFile: String?
 
     init(
       id: UUID?,
@@ -20,8 +36,10 @@ struct TerminalLayoutSnapshot: Codable, Equatable, Sendable {
       customTitle: String?,
       icon: String?,
       tintColor: RepositoryColor?,
-      layout: LayoutNode,
-      focusedLeafIndex: Int
+      layout: LayoutNode?,
+      focusedLeafIndex: Int,
+      kind: TabKind = .terminal,
+      editorFile: String? = nil
     ) {
       self.id = id
       self.title = title
@@ -30,10 +48,12 @@ struct TerminalLayoutSnapshot: Codable, Equatable, Sendable {
       self.tintColor = tintColor
       self.layout = layout
       self.focusedLeafIndex = focusedLeafIndex
+      self.kind = kind
+      self.editorFile = editorFile
     }
 
     private enum CodingKeys: String, CodingKey {
-      case id, title, customTitle, icon, tintColor, layout, focusedLeafIndex
+      case id, title, customTitle, icon, tintColor, layout, focusedLeafIndex, kind, editorFile
     }
 
     init(from decoder: any Decoder) throws {
@@ -45,8 +65,15 @@ struct TerminalLayoutSnapshot: Codable, Equatable, Sendable {
       // `try?` so a tint value the running build doesn't recognize (e.g. hex
       // from a newer build read by an older one) drops the field, not the tab.
       tintColor = (try? container.decodeIfPresent(RepositoryColor.self, forKey: .tintColor)) ?? nil
-      layout = try container.decode(LayoutNode.self, forKey: .layout)
-      focusedLeafIndex = try container.decode(Int.self, forKey: .focusedLeafIndex)
+      // Editor tabs persist no layout; a terminal tab always carries one.
+      // `decodeIfPresent` keeps legacy terminal-only snapshots decoding and
+      // tolerates the new editor shape that omits `layout`.
+      layout = try container.decodeIfPresent(LayoutNode.self, forKey: .layout)
+      focusedLeafIndex = (try? container.decodeIfPresent(Int.self, forKey: .focusedLeafIndex)) ?? 0
+      // Absent on legacy snapshots → `.terminal`. An unrecognized future value
+      // also falls back to `.terminal` so a downgrade can't strand a tab.
+      kind = (try? container.decodeIfPresent(TabKind.self, forKey: .kind)) ?? .terminal
+      editorFile = try container.decodeIfPresent(String.self, forKey: .editorFile)
     }
   }
 
@@ -135,17 +162,18 @@ nonisolated extension TerminalLayoutSnapshot.LayoutNode {
 nonisolated extension TerminalLayoutSnapshot {
   /// Every surface UUID persisted across every tab in this layout. Drives the
   /// launch-time orphan-session reaper: any `supa-<uuid>` zmx hosts that isn't
-  /// in this set across all worktrees is safe to kill.
+  /// in this set across all worktrees is safe to kill. Editor tabs own no
+  /// layout, so they contribute no surface IDs.
   var allSurfaceIDs: [UUID] {
-    tabs.flatMap { $0.layout.leafSurfaceIDs }
+    tabs.flatMap { $0.layout?.leafSurfaceIDs ?? [] }
   }
 
   /// Walk every leaf in every tab and emit `(surfaceID, [agents])` for any
   /// leaf with a non-empty `agents` array. Source of truth for the launch-time
   /// agent-presence restore now that records live in layout leaves instead of
-  /// a parallel `agent-presence.json` file.
+  /// a parallel `agent-presence.json` file. Editor tabs own no layout / agents.
   func allAgentRecords() -> [(surfaceID: UUID, records: [SurfaceAgentRecord])] {
-    tabs.flatMap { $0.layout.leafAgents() }
+    tabs.flatMap { $0.layout?.leafAgents() ?? [] }
   }
 }
 

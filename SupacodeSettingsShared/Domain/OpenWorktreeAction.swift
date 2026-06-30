@@ -50,6 +50,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   case androidStudio
   case antigravity
   case editor
+  case supacode
   case finder
   case cursor
   case githubDesktop
@@ -86,6 +87,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     switch self {
     case .finder: "Reveal in Finder"
     case .editor: "$EDITOR"
+    case .supacode: "Supacode"
     case .alacritty: "Alacritty"
     case .androidStudio: "Android Studio"
     case .antigravity: "Antigravity"
@@ -127,7 +129,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
       .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm, .rubymine,
       .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
-      .vscodium, .warp, .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview:
+      .vscodium, .warp, .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview, .supacode:
       title
     }
   }
@@ -136,6 +138,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     switch self {
     case .editor:
       return .symbol("apple.terminal")
+    case .supacode:
+      return .symbol("chevron.left.forwardslash.chevron.right")
     default:
       guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
       else { return nil }
@@ -145,7 +149,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
 
   public var isInstalled: Bool {
     switch self {
-    case .finder, .editor:
+    case .finder, .editor, .supacode:
       return true
     case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
       .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm, .rubymine,
@@ -155,10 +159,22 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     }
   }
 
+  /// In-development editors stay hidden until their Feature Flag is enabled;
+  /// every shipped editor is always enabled.
+  public var isFeatureEnabled: Bool {
+    switch self {
+    case .supacode:
+      return FeatureFlag.editorView.isEnabled
+    default:
+      return true
+    }
+  }
+
   public var settingsID: String {
     switch self {
     case .finder: "finder"
     case .editor: "editor"
+    case .supacode: "supacode"
     case .alacritty: "alacritty"
     case .androidStudio: "android-studio"
     case .antigravity: "antigravity"
@@ -197,6 +213,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     switch self {
     case .finder: "com.apple.finder"
     case .editor: ""
+    case .supacode: ""
     case .alacritty: "org.alacritty"
     case .androidStudio: "com.google.android.studio"
     case .antigravity: "com.google.antigravity"
@@ -242,7 +259,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .alacritty, .androidStudio, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop,
       .gitkraken, .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm,
       .rubymine, .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode,
-      .vscodeInsiders, .vscodium, .warp, .webstorm, .wezterm, .windsurf, .zed, .zedPreview:
+      .vscodeInsiders, .vscodium, .warp, .webstorm, .wezterm, .windsurf, .zed, .zedPreview, .supacode:
       [.default]
     }
   }
@@ -269,7 +286,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
       ]
     case .alacritty, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop, .gitkraken, .gitup,
       .ghostty, .kitty, .nova, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
-      .vscodium, .warp, .wezterm, .windsurf, .xcode:
+      .vscodium, .warp, .wezterm, .windsurf, .xcode, .supacode:
       [.default]
     }
   }
@@ -277,6 +294,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   public nonisolated static let automaticSettingsID = "auto"
 
   public static let editorPriority: [OpenWorktreeAction] = [
+    .supacode,
     .cursor,
     .zed,
     .zedPreview,
@@ -322,7 +340,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
       return automaticSettingsID
     }
     guard let action = allCases.first(where: { $0.settingsID == settingsID }),
-      action.isInstalled
+      action.isInstalled, action.isFeatureEnabled
     else {
       return automaticSettingsID
     }
@@ -334,7 +352,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     defaultEditorID: String?
   ) -> OpenWorktreeAction {
     if let settingsID, settingsID != automaticSettingsID,
-      let action = allCases.first(where: { $0.settingsID == settingsID })
+      let action = allCases.first(where: { $0.settingsID == settingsID }),
+      action.isFeatureEnabled
     {
       return action
     }
@@ -348,15 +367,15 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   }
 
   public static var availableCases: [OpenWorktreeAction] {
-    menuOrder.filter(\.isInstalled)
+    menuOrder.filter { $0.isInstalled && $0.isFeatureEnabled }
   }
 
   public static func availableSelection(_ selection: OpenWorktreeAction) -> OpenWorktreeAction {
-    selection.isInstalled ? selection : preferredDefault()
+    (selection.isInstalled && selection.isFeatureEnabled) ? selection : preferredDefault()
   }
 
   public static func preferredDefault() -> OpenWorktreeAction {
-    defaultPriority.first(where: \.isInstalled) ?? .finder
+    defaultPriority.first { $0.isInstalled && $0.isFeatureEnabled } ?? .finder
   }
 
   private static let xcodeSearchExcludedDirectories =

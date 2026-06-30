@@ -31,5 +31,9 @@ let package = Package(
     .package(url: "https://github.com/pointfreeco/swift-perception", exact: "2.0.9"),
     .package(url: "https://github.com/pointfreeco/swift-sharing", exact: "2.7.4"),
     .package(url: "https://github.com/pointfreeco/xctest-dynamic-overlay", exact: "1.8.1"),
+    .package(url: "https://github.com/krzyzanowskim/STTextView", exact: "2.3.10"),
+    .package(url: "https://github.com/CodeEditApp/CodeEditSourceEditor", from: "0.15.2"),
+    .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", exact: "0.25.0"),
+    .package(url: "https://github.com/alex-pinkus/tree-sitter-swift", exact: "0.7.3-with-generated-files"),
   ]
 )

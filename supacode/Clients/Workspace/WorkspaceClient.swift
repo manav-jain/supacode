@@ -9,14 +9,29 @@ struct WorkspaceClient {
       _ worktree: Worktree,
       _ onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
     ) -> Void
+  var openFile:
+    @MainActor @Sendable (
+      _ action: OpenWorktreeAction,
+      _ worktree: Worktree,
+      _ fileURL: URL,
+      _ onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
+    ) -> Void
 }
 
 extension WorkspaceClient: DependencyKey {
-  static let liveValue = WorkspaceClient { action, worktree, onError in
-    WorktreeOpener.perform(action: action, worktree: worktree, onError: onError)
-  }
+  static let liveValue = WorkspaceClient(
+    open: { action, worktree, onError in
+      WorktreeOpener.perform(action: action, worktree: worktree, onError: onError)
+    },
+    openFile: { action, worktree, fileURL, onError in
+      WorktreeOpener.performFile(action: action, worktree: worktree, fileURL: fileURL, onError: onError)
+    }
+  )
 
-  static let testValue = WorkspaceClient { _, _, _ in }
+  static let testValue = WorkspaceClient(
+    open: { _, _, _ in },
+    openFile: { _, _, _, _ in }
+  )
 }
 
 extension DependencyValues {
@@ -33,7 +48,7 @@ enum WorktreeOpener {
     worktree: Worktree,
     onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
   ) {
-    guard action != .editor else {
+    guard action != .editor, action != .supacode else {
       return
     }
     guard let targetURL = WorkspaceOpenResolver.resolveFirstTarget(for: action.openTargets, worktree: worktree) else {
@@ -80,6 +95,60 @@ enum WorktreeOpener {
       OpenActionError(
         title: "Unable to open in \(action.title)",
         message: "No supported open behavior was available for this worktree."
+      )
+    )
+  }
+
+  /// Open a single file (rather than the worktree root) in `action`. Mirrors
+  /// `perform`, but resolves the target to the file URL via the existing
+  /// `.url` `OpenTarget`. `.editor` / `.supacode` are no-ops here — the in-app
+  /// editor / `$EDITOR` terminal flows don't take a file argument from this
+  /// path. `.finder` reveals the file in a Finder window.
+  static func performFile(
+    action: OpenWorktreeAction,
+    worktree: Worktree,
+    fileURL: URL,
+    onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
+  ) {
+    guard action != .editor, action != .supacode else {
+      return
+    }
+    let targetURL = fileURL
+    guard action != .finder else {
+      NSWorkspace.shared.activateFileViewerSelecting([targetURL])
+      return
+    }
+    guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: action.bundleIdentifier) else {
+      onError(.appNotFound(action))
+      return
+    }
+    for behavior in action.openBehaviors {
+      switch behavior {
+      case .workspace(let configuration):
+        openWithWorkspace(
+          action: action,
+          configuration: configuration,
+          appURL: appURL,
+          targetURL: targetURL,
+          onError: onError
+        )
+        return
+      case .process(let executable, let args):
+        switch openWithProcess(executable: executable, args: args, appURL: appURL, targetURL: targetURL) {
+        case .launched:
+          return
+        case .unavailable:
+          continue
+        case .failed(let error):
+          onError(.openFailed(action, error))
+          return
+        }
+      }
+    }
+    onError(
+      OpenActionError(
+        title: "Unable to open in \(action.title)",
+        message: "No supported open behavior was available for this file."
       )
     )
   }

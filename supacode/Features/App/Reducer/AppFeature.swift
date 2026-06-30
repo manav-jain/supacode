@@ -27,6 +27,8 @@ struct AppFeature {
     var settings: SettingsFeature.State
     var updates = UpdatesFeature.State()
     var commandPalette = CommandPaletteFeature.State()
+    var fileSearch = FileSearchFeature.State()
+    var contentSearch = ContentSearchFeature.State()
     /// Terminal-orchestration state. Owns the per-tab feature collection so
     /// tab-bar views scope through `\.terminals` (narrow) instead of the full
     /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
@@ -107,6 +109,10 @@ struct AppFeature {
     case settings(SettingsFeature.Action)
     case updates(UpdatesFeature.Action)
     case commandPalette(CommandPaletteFeature.Action)
+    case fileSearch(FileSearchFeature.Action)
+    case contentSearch(ContentSearchFeature.Action)
+    case presentFileSearch
+    case presentContentSearch
     case openActionSelectionChanged(OpenWorktreeAction)
     case worktreeSettingsLoaded(RepositorySettings, worktreeID: Worktree.ID)
     case openSelectedWorktree
@@ -376,7 +382,7 @@ struct AppFeature {
           appLogger.warning("openWorktreeInApp: worktree \(worktreeID) not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: action, source: .contextMenu, state: state)
+        return openWorktreeEffect(worktree: worktree, action: action, source: .contextMenu, state: &state)
 
       case .repositories(.delegate(.openRepositorySettings(let repositoryID))):
         guard let repository = state.repositories.repositories[id: repositoryID] else {
@@ -502,14 +508,14 @@ struct AppFeature {
           appLogger.warning("revealInFinder: selected worktree not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: .finder, source: .revealInFinder, state: state)
+        return openWorktreeEffect(worktree: worktree, action: .finder, source: .revealInFinder, state: &state)
 
       case .openWorktree(let action):
         guard let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID) else {
           appLogger.warning("openWorktree: selected worktree not found, ignoring.")
           return .none
         }
-        return openWorktreeEffect(worktree: worktree, action: action, source: .toolbar, state: state)
+        return openWorktreeEffect(worktree: worktree, action: action, source: .toolbar, state: &state)
 
       case .openWorktreeFailed(let error):
         state.alert = AlertState {
@@ -1013,6 +1019,50 @@ struct AppFeature {
       case .commandPalette:
         return .none
 
+      case .presentFileSearch:
+        // Gated behind the feature flag and a local worktree selection. A
+        // hotkey can reach here regardless of the menu's enabled state, so the
+        // guard lives in the reducer too. Remote worktrees have no on-disk path
+        // to enumerate, so `localWorkingDirectory` is the gate.
+        guard FeatureFlag.quickSearch.isEnabled else { return .none }
+        guard
+          let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
+          worktree.localWorkingDirectory != nil
+        else {
+          return .none
+        }
+        // Global scope searches every local worktree, so hand the feature the
+        // full root list; it filters to the selected one when scope is Worktree.
+        let roots = Self.fileSearchRoots(from: state.repositories)
+        return .send(.fileSearch(.present(selectedWorktreeID: worktree.id, roots: roots)))
+
+      case .fileSearch(.delegate(.openFile(let url, let worktreeID))):
+        guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
+        return openFileEffect(worktree: worktree, fileURL: url, state: &state)
+
+      case .fileSearch:
+        return .none
+
+      case .presentContentSearch:
+        // Same gates as `presentFileSearch`: feature flag + a local worktree
+        // selection (remote worktrees have no on-disk path to grep).
+        guard FeatureFlag.quickSearch.isEnabled else { return .none }
+        guard
+          let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
+          worktree.localWorkingDirectory != nil
+        else {
+          return .none
+        }
+        let roots = Self.contentSearchRoots(from: state.repositories)
+        return .send(.contentSearch(.present(selectedWorktreeID: worktree.id, roots: roots)))
+
+      case .contentSearch(.delegate(.openMatch(let url, let line, let worktreeID))):
+        guard let worktree = state.repositories.worktree(for: worktreeID) else { return .none }
+        return openFileEffect(worktree: worktree, fileURL: url, line: line, state: &state)
+
+      case .contentSearch:
+        return .none
+
       case .terminalEvent(.notificationReceived(let worktreeID, let surfaceID, let title, let body)):
         var effects: [Effect<Action>] = [
           .send(.repositories(.worktreeNotificationReceived(worktreeID)))
@@ -1108,6 +1158,11 @@ struct AppFeature {
       case .terminalEvent(.tabProjectionChanged(let worktreeID, let projection)):
         return .send(.terminals(.tabProjectionChanged(worktreeID: worktreeID, projection: projection)))
 
+      case .terminalEvent(.editorTabCreated(let worktreeID, let tabID, let fileURL, let line)):
+        return .send(
+          .terminals(.editorTabOpened(worktreeID: worktreeID, tabID: tabID, fileURL: fileURL, line: line))
+        )
+
       case .terminalEvent(.tabRemoved(let worktreeID, let tabID)):
         return .send(.terminals(.tabRemoved(worktreeID: worktreeID, tabID: tabID)))
 
@@ -1118,6 +1173,20 @@ struct AppFeature {
         return .send(
           .terminals(.terminalTabs(.element(id: tabID, action: .progressDisplayChanged(display))))
         )
+
+      case .terminals(
+        .editorTabs(.element(let tabIDRaw, .delegate(.dirtyChanged(let isDirty))))):
+        // Mirror the editor's unsaved-changes state onto the tab dirty
+        // indicator (tab-bar shimmer). Look up the owning worktree recorded
+        // when the editor tab was opened.
+        let tabID = TerminalTabID(rawValue: tabIDRaw)
+        guard
+          let worktreeID = state.terminals.editorTabWorktreeIDs[tabID],
+          let worktree = state.repositories.worktree(for: worktreeID)
+        else { return .none }
+        return .run { _ in
+          await terminalClient.send(.setEditorTabDirty(worktree, tabID: tabID, isDirty: isDirty))
+        }
 
       case .terminals:
         return .none
@@ -1154,6 +1223,12 @@ struct AppFeature {
     }
     Scope(state: \.commandPalette, action: \.commandPalette) {
       CommandPaletteFeature()
+    }
+    Scope(state: \.fileSearch, action: \.fileSearch) {
+      FileSearchFeature()
+    }
+    Scope(state: \.contentSearch, action: \.contentSearch) {
+      ContentSearchFeature()
     }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
@@ -1254,7 +1329,7 @@ struct AppFeature {
     worktree: Worktree,
     action: OpenWorktreeAction,
     source: OpenWorktreeSource,
-    state: State
+    state: inout State
   ) -> Effect<Action> {
     // Orphan rows can't be opened anywhere meaningful; bail out
     // before invoking the workspace / terminal client.
@@ -1270,6 +1345,15 @@ struct AppFeature {
       return .none
     }
     analyticsClient.capture("worktree_opened", ["action": action.settingsID, "source": source.rawValue])
+    if action == .supacode {
+      // Open the in-app Supacode editor as a tab peer to the worktree's terminal
+      // tabs. No file bound (the user opens a file from within); the editor tab
+      // renders its empty state until a file is loaded.
+      appLogger.info("Open in Supacode editor tab for \(worktree.id)")
+      return .run { _ in
+        await terminalClient.send(.createEditorTab(worktree, fileURL: nil))
+      }
+    }
     guard action == .editor else {
       return .run { send in
         await workspaceClient.open(action, worktree) { error in
@@ -1287,6 +1371,108 @@ struct AppFeature {
           runSetupScriptIfNew: shouldRunSetupScript
         )
       )
+    }
+  }
+
+  /// Every local worktree across all repositories, as `FileSearchRoot`s for the
+  /// quick-open finder. Only worktrees with an on-disk path and no remote host
+  /// qualify (remote worktrees can't be enumerated). The display name mirrors the
+  /// command palette's "Repo / Worktree" label (repo-name-only for folders).
+  static func fileSearchRoots(from repositories: RepositoriesFeature.State) -> [FileSearchRoot] {
+    var roots: [FileSearchRoot] = []
+    for row in repositories.orderedSidebarItems() {
+      guard
+        let worktree = repositories.worktree(for: row.id),
+        worktree.host == nil,
+        let url = worktree.localWorkingDirectory
+      else {
+        continue
+      }
+      let repositoryName = Repository.sidebarDisplayName(
+        custom: repositories.sidebar.sections[row.repositoryID]?.title,
+        fallback: repositories.repositoryName(for: row.repositoryID) ?? "Repository"
+      )
+      let worktreeDisplayName = SidebarDisplayName.resolved(custom: row.customTitle, fallback: row.name) ?? row.name
+      // Folder rows have a single synthetic "main" worktree whose name matches the
+      // repo, so "Repo / Worktree" would read "Foo / Foo"; use the repo name alone.
+      let displayName = row.isFolder ? repositoryName : "\(repositoryName) / \(worktreeDisplayName)"
+      roots.append(FileSearchRoot(worktreeID: worktree.id, url: url, displayName: displayName))
+    }
+    return roots
+  }
+
+  /// Every local worktree across all repositories, as `ContentSearchRoot`s for
+  /// find-in-files. Mirrors `fileSearchRoots` (same local-only / display-name
+  /// rules) but additionally tags each root with `isGitRepository` so the engine
+  /// can pick `git grep` vs. the Swift walk per root.
+  static func contentSearchRoots(from repositories: RepositoriesFeature.State) -> [ContentSearchRoot] {
+    var roots: [ContentSearchRoot] = []
+    for row in repositories.orderedSidebarItems() {
+      guard
+        let worktree = repositories.worktree(for: row.id),
+        worktree.host == nil,
+        let url = worktree.localWorkingDirectory
+      else {
+        continue
+      }
+      let repositoryName = Repository.sidebarDisplayName(
+        custom: repositories.sidebar.sections[row.repositoryID]?.title,
+        fallback: repositories.repositoryName(for: row.repositoryID) ?? "Repository"
+      )
+      let worktreeDisplayName = SidebarDisplayName.resolved(custom: row.customTitle, fallback: row.name) ?? row.name
+      let displayName = row.isFolder ? repositoryName : "\(repositoryName) / \(worktreeDisplayName)"
+      // A folder row is non-git; a git worktree row is git. `row.isFolder`
+      // mirrors the repository's `isGitRepository == false` classification.
+      let isGitRepository = !row.isFolder
+      roots.append(
+        ContentSearchRoot(
+          worktreeID: worktree.id,
+          url: url,
+          displayName: displayName,
+          isGitRepository: isGitRepository
+        )
+      )
+    }
+    return roots
+  }
+
+  /// Open a single file from the quick-open finder in the user's selected
+  /// editor. Mirrors `openWorktreeEffect`'s pre-screens (missing / remote) and
+  /// editor resolution, but targets the file URL rather than the worktree root.
+  /// `.supacode` is a no-op seam until the in-app editor tab lands (Phase 4).
+  private func openFileEffect(
+    worktree: Worktree,
+    fileURL: URL,
+    line: Int? = nil,
+    state: inout State
+  ) -> Effect<Action> {
+    if worktree.isMissing {
+      appLogger.info("Ignoring file open for missing worktree \(worktree.id)")
+      return .none
+    }
+    if worktree.host != nil {
+      appLogger.info("Ignoring file open for remote worktree \(worktree.id)")
+      return .none
+    }
+    // Resolve the editor the same way the app does for the selected worktree.
+    // `openActionSelection` already reflects this worktree's repo setting +
+    // default-editor fallback; `availableSelection` re-validates install /
+    // feature-flag state so a since-uninstalled editor falls back gracefully.
+    let action = OpenWorktreeAction.availableSelection(state.openActionSelection)
+    if action == .supacode {
+      // Open the file in the in-app Supacode editor as a tab peer to the
+      // worktree's terminal tabs. `line` (from find-in-files) scrolls the editor
+      // to the matched line once loaded; the dedup path re-scrolls an open file.
+      appLogger.info("Open file in Supacode editor tab for \(worktree.id): \(fileURL.lastPathComponent)")
+      return .run { _ in
+        await terminalClient.send(.createEditorTab(worktree, fileURL: fileURL, line: line))
+      }
+    }
+    // External editors have no line-targeting via this path; open the file.
+    return .run { send in
+      await workspaceClient.openFile(action, worktree, fileURL) { error in
+        send(.openWorktreeFailed(error))
+      }
     }
   }
 

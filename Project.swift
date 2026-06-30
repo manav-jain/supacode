@@ -46,6 +46,7 @@ let appDependencies: [TargetDependency] = [
   .target(name: "SupacodeSettingsFeature"),
   .target(name: "GhosttyKit"),
   .target(name: "supacode-cli"),
+  .external(name: "CodeEditSourceEditor"),
   .external(name: "ComposableArchitecture"),
   .external(name: "CustomDump"),
   .external(name: "Dependencies"),
@@ -56,6 +57,9 @@ let appDependencies: [TargetDependency] = [
   .external(name: "Sentry"),
   .external(name: "Sharing"),
   .external(name: "Sparkle"),
+  .external(name: "STTextView"),
+  .external(name: "SwiftTreeSitter"),
+  .external(name: "TreeSitterSwift"),
 ]
 
 let testDependencies: [TargetDependency] = [

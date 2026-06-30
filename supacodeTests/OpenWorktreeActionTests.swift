@@ -191,6 +191,57 @@ struct OpenWorktreeActionTests {
     #expect(errors.isEmpty)
   }
 
+  @Test func supacodeIsConfiguredAsInternalEditor() {
+    #expect(OpenWorktreeAction.supacode.title == "Supacode")
+    #expect(OpenWorktreeAction.supacode.labelTitle == "Supacode")
+    #expect(OpenWorktreeAction.supacode.settingsID == "supacode")
+    #expect(OpenWorktreeAction.supacode.bundleIdentifier == "")
+    #expect(OpenWorktreeAction.supacode.isInstalled)
+    #expect(OpenWorktreeAction.supacode.openTargets == [.default])
+    #expect(OpenWorktreeAction.supacode.openBehaviors == [.default])
+    #expect(OpenWorktreeAction.editorPriority.contains(.supacode))
+    #expect(OpenWorktreeAction.menuOrder.map(\.settingsID).contains("supacode"))
+  }
+
+  @Test func supacodeIsGatedBehindItsFeatureFlag() {
+    let key = FeatureFlag.editorView.storageKey
+    let prior = UserDefaults.standard.object(forKey: key)
+    defer {
+      if let prior {
+        UserDefaults.standard.set(prior, forKey: key)
+      } else {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
+    }
+
+    // Flag off (the default): `.supacode` is hidden from the editor list and is
+    // never the resolved default, even though it always leads editorPriority.
+    UserDefaults.standard.set(false, forKey: key)
+    #expect(OpenWorktreeAction.editorPriority.first == .supacode)
+    #expect(!OpenWorktreeAction.availableCases.contains(.supacode))
+    #expect(OpenWorktreeAction.preferredDefault() != .supacode)
+    #expect(OpenWorktreeAction.fromSettingsID("supacode", defaultEditorID: nil) != .supacode)
+
+    // Flag on: `.supacode` becomes selectable and the out-of-box default.
+    UserDefaults.standard.set(true, forKey: key)
+    #expect(OpenWorktreeAction.availableCases.contains(.supacode))
+    #expect(OpenWorktreeAction.preferredDefault() == .supacode)
+    #expect(OpenWorktreeAction.fromSettingsID("supacode", defaultEditorID: nil) == .supacode)
+  }
+
+  @MainActor
+  @Test func worktreeOpenerNoopsSupacodeAction() {
+    var errors: [OpenActionError] = []
+
+    WorktreeOpener.perform(
+      action: .supacode,
+      worktree: Self.makeWorktree(at: URL(filePath: "/tmp/repo")),
+      onError: { errors.append($0) }
+    )
+
+    #expect(errors.isEmpty)
+  }
+
   @Test func resolverSkipsExcludedSearchDirectoriesAndFallsBackToNextTarget() throws {
     let rootURL = try Self.makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: rootURL) }
