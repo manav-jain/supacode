@@ -1,6 +1,5 @@
 import ComposableArchitecture
-import STTextViewSwiftUI
-import STTextViewSwiftUICommon
+import STTextView
 import SwiftUI
 
 /// The in-app editor surface. Wraps STTextView's SwiftUI `TextView` (2.3.10),
@@ -24,6 +23,10 @@ struct EditorView: View {
       .onAppear {
         highlightModel.setFileURL(store.fileURL)
         highlightModel.scheduleHighlight(for: store.text)
+        // Re-paint already-computed colors in case this tab's text view was
+        // rebuilt while switched away (the reparse above is skipped when nothing
+        // changed, so it wouldn't re-color on its own).
+        highlightModel.applyCachedHighlights()
         highlightModel.updateGutter(status: store.gutterStatus)
         revealPendingLineIfReady()
         // Compute the gutter strip for the file that's already loaded.
@@ -158,31 +161,36 @@ struct EditorView: View {
   }
 
   private var editor: some View {
-    // Reading `styleGeneration` here ties the body to highlight completions so
-    // the colored attributed string is re-read once tree-sitter finishes.
-    _ = highlightModel.styleGeneration
-    return
-      TextView(
-        text: textBinding,
-        selection: $selection,
-        options: [.wrapLines, .highlightSelectedLine],
-        plugins: [highlightModel.scrollPlugin, highlightModel.gutterStripPlugin]
-      )
-      .textViewFont(highlightModel.font)
-      .disabled(store.isLoading)
-      .overlay(alignment: .top) {
-        symbolPicker
+    // A custom AppKit wrapper (not STTextView's stock SwiftUI `TextView`): the
+    // text view owns its buffer + native undo, edits flow out via `onTextChange`,
+    // and syntax colors are painted as rendering attributes by `highlightModel`
+    // — so ⌘Z works and highlighting never round-trips through the buffer.
+    EditorTextView(
+      text: store.text,
+      selection: $selection,
+      isEditable: !store.isLoading,
+      font: highlightModel.font,
+      wrapLines: true,
+      highlightSelectedLine: true,
+      plugins: [highlightModel.scrollPlugin, highlightModel.gutterStripPlugin],
+      onTextChange: { newText in
+        guard newText != store.text else { return }
+        store.send(.textChanged(newText))
       }
-      .safeAreaInset(edge: .top, spacing: 0) {
-        if store.externallyModified {
-          externalChangeBanner
-        }
+    )
+    .overlay(alignment: .top) {
+      symbolPicker
+    }
+    .safeAreaInset(edge: .top, spacing: 0) {
+      if store.externallyModified {
+        externalChangeBanner
       }
-      .safeAreaInset(edge: .bottom, spacing: 0) {
-        if store.showingBlame {
-          blameBar
-        }
+    }
+    .safeAreaInset(edge: .bottom, spacing: 0) {
+      if store.showingBlame {
+        blameBar
       }
+    }
   }
 
   /// Subtle bottom bar showing `git blame` for the line the caret is on. Dimmed /
@@ -290,21 +298,5 @@ struct EditorView: View {
     } description: {
       Text(message)
     }
-  }
-
-  /// Bridges the feature's plain `String` buffer to STTextView's
-  /// `AttributedString` binding. Reads produce the syntax-colored string from
-  /// `EditorHighlightModel`; writes extract the characters and send
-  /// `.textChanged` (no direct state mutation, per the
-  /// `store_state_mutation_in_views` lint rule).
-  private var textBinding: Binding<AttributedString> {
-    Binding(
-      get: { highlightModel.styledString(for: store.text) },
-      set: { newValue in
-        let plain = String(newValue.characters)
-        guard plain != store.text else { return }
-        store.send(.textChanged(plain))
-      }
-    )
   }
 }

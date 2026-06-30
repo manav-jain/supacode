@@ -52,27 +52,9 @@ final class EditorHighlightModel {
     language = EditorLanguage.forFileURL(url)
   }
 
-  /// Build the colored `AttributedString` for `text` synchronously using the
-  /// latest computed symbols' sibling highlights. This is what the view binds
-  /// for reads — it always reflects the current `text`, with whatever
-  /// highlights were last computed for that exact text (else just the base
-  /// font, so a not-yet-restyled buffer still renders correctly).
-  func styledString(for text: String) -> AttributedString {
-    var attributed = AttributedString(text)
-    attributed.font = font
-    attributed.foregroundColor = SyntaxTheme.defaultColor
-
-    // Only color if the cached highlights were computed for this exact text.
-    guard text == lastStyledText, !cachedHighlights.isEmpty else {
-      return attributed
-    }
-    apply(cachedHighlights, to: &attributed, textUTF16Count: text.utf16.count)
-    return attributed
-  }
-
   /// Kick off a debounced restyle for the given text. When it completes, the
-  /// cached highlights + symbols are updated and `objectWillChange` fires via
-  /// `@Observable`, prompting the view to re-read `styledString(for:)`.
+  /// cached highlights + symbols are updated and the highlights are painted onto
+  /// the live text view as rendering attributes (see `applyCachedHighlights`).
   func scheduleHighlight(for text: String) {
     // Skip if nothing relevant changed.
     if text == lastStyledText, language == lastStyledLanguage {
@@ -96,8 +78,7 @@ final class EditorHighlightModel {
       self.symbols = symbols
       self.lastStyledText = text
       self.lastStyledLanguage = language
-      // Bump an observed token so SwiftUI re-reads styledString(for:).
-      self.styleGeneration &+= 1
+      self.applyCachedHighlights()
     }
   }
 
@@ -161,21 +142,25 @@ final class EditorHighlightModel {
 
   // MARK: - Internals
 
-  /// Bumped whenever a restyle finishes; observed so the view re-renders.
-  private(set) var styleGeneration: Int = 0
-
   @ObservationIgnored private var cachedHighlights: [SyntaxHighlight] = []
 
-  /// Layer color attributes onto the attributed string. Highlights arrive
-  /// least-specific first, so applying in order lets specific captures win.
-  private func apply(_ highlights: [SyntaxHighlight], to attributed: inout AttributedString, textUTF16Count: Int) {
-    for highlight in highlights {
+  /// Paint the cached tree-sitter highlights onto the live text view as STTextView
+  /// *rendering* attributes (draw-only — they never mutate the document, so the
+  /// undo stack is untouched). Safe to call repeatedly: `EditorView.onAppear`
+  /// calls it so a tab switched back into (with a possibly fresh text view)
+  /// re-colors without a reparse. No-ops until `ScrollPlugin` has captured the
+  /// text view, or while the buffer is empty.
+  func applyCachedHighlights() {
+    guard let textView = scrollPlugin.textView else { return }
+    let count = (textView.text ?? "").utf16.count
+    guard count > 0 else { return }
+    let fullRange = NSRange(location: 0, length: count)
+    // Reset to the view's default text color, then overlay each capture's color.
+    textView.removeRenderingAttribute(.foregroundColor, range: fullRange)
+    for highlight in cachedHighlights {
       guard let color = SyntaxTheme.color(for: highlight.captureName) else { continue }
-      guard
-        let range = Range(highlight.range, in: attributed),
-        NSMaxRange(highlight.range) <= textUTF16Count
-      else { continue }
-      attributed[range].foregroundColor = color
+      guard NSMaxRange(highlight.range) <= count else { continue }
+      textView.addRenderingAttributes([.foregroundColor: color], range: highlight.range)
     }
   }
 }
