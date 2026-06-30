@@ -76,6 +76,33 @@ struct EditorView: View {
       .overlay(alignment: .top) {
         symbolPicker
       }
+      .safeAreaInset(edge: .top, spacing: 0) {
+        if store.externallyModified {
+          externalChangeBanner
+        }
+      }
+  }
+
+  /// Non-blocking banner shown when the open file changed on disk while the
+  /// buffer had unsaved edits. Lets the user discard local changes (Reload) or
+  /// keep them (the next save overwrites disk).
+  private var externalChangeBanner: some View {
+    HStack(spacing: 12) {
+      Label("This file changed on disk", systemImage: "exclamationmark.triangle.fill")
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      Button("Reload") { store.send(.reloadFromDisk) }
+        .help("Discard your local changes and reload the file from disk")
+      Button("Keep My Changes") { store.send(.keepLocalChanges) }
+        .help("Keep your edits; the next save overwrites the version on disk")
+    }
+    .font(.callout)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 8)
+    .background(.regularMaterial)
+    .overlay(alignment: .bottom) {
+      Divider()
+    }
   }
 
   @ViewBuilder private var symbolPicker: some View {

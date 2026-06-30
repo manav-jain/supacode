@@ -32,6 +32,11 @@ struct EditorFeature {
     /// True while a `read` is in flight, so the view can show a loading state
     /// and ⌘S no-ops mid-load.
     var isLoading: Bool
+    /// Set when the file changed on disk *while the buffer was dirty*. The user
+    /// has unsaved local edits AND the file moved underneath them, so we can't
+    /// silently reload (that would clobber their work). Drives the conflict
+    /// banner in `EditorView`; cleared by resolving the conflict (Reload / Keep).
+    var externallyModified: Bool
 
     init(
       id: UUID = UUID(),
@@ -39,7 +44,8 @@ struct EditorFeature {
       text: String = "",
       isDirty: Bool = false,
       loadError: String? = nil,
-      isLoading: Bool = false
+      isLoading: Bool = false,
+      externallyModified: Bool = false
     ) {
       self.id = id
       self.fileURL = fileURL
@@ -47,6 +53,7 @@ struct EditorFeature {
       self.isDirty = isDirty
       self.loadError = loadError
       self.isLoading = isLoading
+      self.externallyModified = externallyModified
     }
   }
 
@@ -66,6 +73,20 @@ struct EditorFeature {
     case saved
     /// Async write failed; `message` is a user-facing description.
     case saveFailed(String)
+    /// The file watcher observed an external on-disk change. Triggers a re-read
+    /// so `externalChangeResolved` can compare disk vs. buffer.
+    case externalChange
+    /// The re-read after an `externalChange` completed with the current on-disk
+    /// contents. Self-write suppression and clean/dirty branching happen here.
+    case externalChangeResolved(String)
+    /// Resolve a conflict by reloading from disk, discarding local edits.
+    case reloadFromDisk
+    /// Resolve a conflict by keeping the local buffer; the next save overwrites
+    /// disk. Just clears the flag — the buffer stays dirty.
+    case keepLocalChanges
+    /// Debounced auto-save fired. Re-checks the guards (still dirty, still has a
+    /// URL, no unresolved conflict) before delegating to `save`.
+    case autoSaveFired
     case delegate(Delegate)
   }
 
@@ -79,17 +100,29 @@ struct EditorFeature {
   private nonisolated enum CancelID: Hashable {
     case load(UUID)
     case save(UUID)
+    case watch(UUID)
+    case autoSave(UUID)
+    case externalRead(UUID)
   }
 
+  /// Debounce window after the user stops typing before auto-save fires.
+  private static let autoSaveDebounce: Duration = .milliseconds(1500)
+
   @Dependency(\.editorFileClient) private var editorFileClient
+  @Dependency(\.fileWatchClient) private var fileWatchClient
+  @Dependency(\.continuousClock) private var clock
 
   var body: some Reducer<State, Action> {
     BindingReducer()
     Reduce { state, action in
       switch action {
       case .binding(\.text):
-        // Two-way text binding edits flow through here. Treat as a content edit.
-        return Self.markDirty(&state, dirty: true)
+        // Two-way text binding edits flow through here. Treat as a content edit
+        // and (re)schedule the auto-save debounce.
+        return .merge(
+          Self.markDirty(&state, dirty: true),
+          autoSaveEffect(state: state)
+        )
 
       case .binding:
         return .none
@@ -98,20 +131,32 @@ struct EditorFeature {
         state.fileURL = url
         state.loadError = nil
         state.isLoading = true
+        // A fresh file means any prior conflict is moot.
+        state.externallyModified = false
         let editorID = state.id
-        return .run { send in
-          do {
-            let text = try await editorFileClient.read(url)
-            await send(.fileLoaded(text))
-          } catch {
-            await send(.loadFailed(error.localizedDescription))
+        return .merge(
+          .run { send in
+            do {
+              let text = try await editorFileClient.read(url)
+              await send(.fileLoaded(text))
+            } catch {
+              await send(.loadFailed(error.localizedDescription))
+            }
           }
-        }
-        .cancellable(id: CancelID.load(editorID), cancelInFlight: true)
+          .cancellable(id: CancelID.load(editorID), cancelInFlight: true),
+          // (Re)start watching this URL; cancelInFlight tears down the previous
+          // watch so the old file's DispatchSource is released.
+          watchEffect(url: url, editorID: editorID),
+          // A new file invalidates any pending auto-save for the old buffer.
+          .cancel(id: CancelID.autoSave(editorID))
+        )
 
       case .textChanged(let text):
         state.text = text
-        return Self.markDirty(&state, dirty: true)
+        return .merge(
+          Self.markDirty(&state, dirty: true),
+          autoSaveEffect(state: state)
+        )
 
       case .fileLoaded(let text):
         state.text = text
@@ -148,10 +193,117 @@ struct EditorFeature {
         editorLogger.warning("Failed to save \(state.fileURL?.lastPathComponent ?? "<none>"): \(message)")
         return .none
 
+      case .externalChange:
+        // The watcher fired. Re-read the current on-disk contents so
+        // `externalChangeResolved` can compare them against our buffer — this is
+        // what suppresses our own writes (disk will match the buffer we just
+        // saved) without relying on a fragile timing window.
+        guard let url = state.fileURL else { return .none }
+        let editorID = state.id
+        return .run { send in
+          do {
+            let text = try await editorFileClient.read(url)
+            await send(.externalChangeResolved(text))
+          } catch {
+            // A failed re-read (e.g. file deleted mid-rename) is not actionable
+            // here; the watcher re-arms and a later event re-triggers the read.
+            editorLogger.debug("External-change re-read failed: \(error.localizedDescription)")
+          }
+        }
+        .cancellable(id: CancelID.externalRead(editorID), cancelInFlight: true)
+
+      case .externalChangeResolved(let diskText):
+        // Self-write suppression: if disk already matches our buffer, the event
+        // was our own save (or a redundant no-op) — do nothing.
+        guard diskText != state.text else { return .none }
+        if state.isDirty {
+          // Unsaved local edits AND the file diverged on disk: don't clobber the
+          // user's work. Surface the conflict banner instead.
+          state.externallyModified = true
+          return .none
+        }
+        // Clean buffer: safe to silently reload to the on-disk contents.
+        state.text = diskText
+        state.loadError = nil
+        return Self.markDirty(&state, dirty: false)
+
+      case .reloadFromDisk:
+        // Resolve the conflict by discarding local edits and re-reading. Clearing
+        // the flag first so the banner dismisses immediately.
+        state.externallyModified = false
+        guard let url = state.fileURL else { return .none }
+        state.isLoading = true
+        let editorID = state.id
+        return .run { send in
+          do {
+            let text = try await editorFileClient.read(url)
+            await send(.fileLoaded(text))
+          } catch {
+            await send(.loadFailed(error.localizedDescription))
+          }
+        }
+        .cancellable(id: CancelID.load(editorID), cancelInFlight: true)
+
+      case .keepLocalChanges:
+        // Resolve the conflict by keeping the buffer; the next save overwrites
+        // disk. Buffer stays dirty, flag clears.
+        state.externallyModified = false
+        return .none
+
+      case .autoSaveFired:
+        // Re-validate the guards at fire time: still has a destination, still
+        // dirty, not loading, and no unresolved external conflict (auto-saving
+        // into a conflict would silently overwrite the on-disk changes).
+        guard
+          state.fileURL != nil,
+          state.isDirty,
+          !state.isLoading,
+          !state.externallyModified
+        else { return .none }
+        return .send(.save)
+
       case .delegate:
         return .none
       }
     }
+  }
+
+  /// Subscribe to the file watcher for `url`, mapping each on-disk change tick
+  /// to an `.externalChange` action. Cancellable + cancel-in-flight keyed on the
+  /// editor id so re-opening a different file tears down the previous watch (and
+  /// its `DispatchSource`) before arming the new one.
+  private func watchEffect(url: URL, editorID: UUID) -> Effect<Action> {
+    // Capture the client up front: it's read on the MainActor-isolated reducer,
+    // but the `.run` operation runs nonisolated, so it can't touch `self`.
+    let fileWatchClient = self.fileWatchClient
+    return .run { send in
+      for await _ in fileWatchClient.watch(url) {
+        await send(.externalChange)
+      }
+    }
+    .cancellable(id: CancelID.watch(editorID), cancelInFlight: true)
+  }
+
+  /// Debounced auto-save: after the user stops typing for `autoSaveDebounce`,
+  /// fire `.autoSaveFired`, which re-validates the guards before saving. No-ops
+  /// (and cancels any pending auto-save) when there's nothing to persist — no
+  /// destination, a clean buffer, mid-load, or an unresolved external conflict.
+  /// Cancellable + cancel-in-flight so each keystroke resets the timer.
+  private func autoSaveEffect(state: State) -> Effect<Action> {
+    let editorID = state.id
+    guard
+      state.fileURL != nil,
+      state.isDirty,
+      !state.isLoading,
+      !state.externallyModified
+    else {
+      return .cancel(id: CancelID.autoSave(editorID))
+    }
+    return .run { send in
+      try await clock.sleep(for: Self.autoSaveDebounce)
+      await send(.autoSaveFired)
+    }
+    .cancellable(id: CancelID.autoSave(editorID), cancelInFlight: true)
   }
 
   /// Set `isDirty` and emit `delegate(.dirtyChanged)` only when it actually
