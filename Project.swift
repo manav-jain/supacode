@@ -39,6 +39,7 @@ let appDependencies: [TargetDependency] = [
   .target(name: "SupacodeSettingsFeature"),
   .target(name: "GhosttyKit"),
   .target(name: "supacode-cli"),
+  .external(name: "CodeEditSourceEditor"),
   .external(name: "ComposableArchitecture"),
   .external(name: "CustomDump"),
   .external(name: "Dependencies"),
