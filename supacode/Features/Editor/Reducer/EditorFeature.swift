@@ -53,6 +53,21 @@ struct EditorFeature {
     /// True while a diff computation is in flight, so the view can show a loading
     /// state instead of a premature "No changes".
     var isDiffLoading: Bool
+    /// Per-working-tree-line git change classification (added / modified /
+    /// deletion boundary) for the gutter change strip (Phase 10). Derived from the
+    /// same working-tree-vs-HEAD diff the diff view uses, refreshed lazily on
+    /// load / save / external reload. Empty when the file has no changes / isn't
+    /// tracked / isn't in a repo.
+    var gutterStatus: [Int: EditorGutterChangeKind]
+    /// True when inline git blame is shown (toolbar toggle). While on, blame is
+    /// (re)loaded on toggle, after a save, and after an external reload, and the
+    /// view shows the focused line's attribution in a subtle bottom bar.
+    var showingBlame: Bool
+    /// The `git blame` attribution for `fileURL`, or `nil` when the file isn't
+    /// tracked / isn't in a repo. Only meaningful while `showingBlame`.
+    var blame: FileBlame?
+    /// True while a blame computation is in flight.
+    var isBlameLoading: Bool
 
     init(
       id: UUID = UUID(),
@@ -65,7 +80,11 @@ struct EditorFeature {
       pendingScrollLine: Int? = nil,
       showingDiff: Bool = false,
       diff: FileDiff? = nil,
-      isDiffLoading: Bool = false
+      isDiffLoading: Bool = false,
+      gutterStatus: [Int: EditorGutterChangeKind] = [:],
+      showingBlame: Bool = false,
+      blame: FileBlame? = nil,
+      isBlameLoading: Bool = false
     ) {
       self.id = id
       self.fileURL = fileURL
@@ -78,6 +97,10 @@ struct EditorFeature {
       self.showingDiff = showingDiff
       self.diff = diff
       self.isDiffLoading = isDiffLoading
+      self.gutterStatus = gutterStatus
+      self.showingBlame = showingBlame
+      self.blame = blame
+      self.isBlameLoading = isBlameLoading
     }
   }
 
@@ -127,6 +150,21 @@ struct EditorFeature {
     /// The async diff computation finished with the parsed diff (or `nil` for no
     /// changes / untracked / not-a-repo).
     case diffLoaded(FileDiff?)
+    /// Recompute the gutter change strip from the working-tree-vs-HEAD diff. No-op
+    /// without a file. Runs lazily on load / save / external reload.
+    case refreshGutter
+    /// The async gutter diff computation finished; the reducer derives the
+    /// per-line change kinds from it (or clears them for a `nil` diff).
+    case gutterDiffLoaded(FileDiff?)
+    /// Toolbar blame button. Flips `showingBlame`; turning it on kicks off a blame
+    /// computation, turning it off clears the blame state.
+    case toggleBlame
+    /// Re-run the blame computation while it's already shown (after save / external
+    /// reload). No-op when blame isn't showing or there's no file.
+    case refreshBlame
+    /// The async blame computation finished with the parsed blame (or `nil` for
+    /// untracked / not-a-repo).
+    case blameLoaded(FileBlame?)
     case delegate(Delegate)
   }
 
@@ -144,6 +182,8 @@ struct EditorFeature {
     case autoSave(UUID)
     case externalRead(UUID)
     case diff(UUID)
+    case gutter(UUID)
+    case blame(UUID)
   }
 
   /// Debounce window after the user stops typing before auto-save fires.
@@ -152,6 +192,7 @@ struct EditorFeature {
   @Dependency(\.editorFileClient) private var editorFileClient
   @Dependency(\.fileWatchClient) private var fileWatchClient
   @Dependency(\.fileDiffClient) private var fileDiffClient
+  @Dependency(\.gitBlameClient) private var gitBlameClient
   @Dependency(\.continuousClock) private var clock
 
   var body: some Reducer<State, Action> {
@@ -220,10 +261,15 @@ struct EditorFeature {
         state.isLoading = false
         state.loadError = nil
         // The on-disk contents just changed under the buffer (initial load or a
-        // conflict-resolving reload). If the diff is showing, recompute it.
+        // conflict-resolving reload). Refresh the (shown) diff / blame so the git
+        // decorations track the working tree. The gutter strip is refreshed
+        // separately by the view via `.refreshGutter` once the buffer renders, so
+        // the strip stays a passive view-owned decoration (no git probe is forced
+        // on a load when no editor is on screen).
         return .merge(
           Self.markDirty(&state, dirty: false),
-          diffRefreshEffectIfShown(state: state)
+          diffRefreshEffectIfShown(state: state),
+          blameRefreshEffectIfShown(state: state)
         )
 
       case .loadFailed(let message):
@@ -249,10 +295,13 @@ struct EditorFeature {
         .cancellable(id: CancelID.save(editorID), cancelInFlight: true)
 
       case .saved:
-        // A save changed the working tree; refresh the diff if it's showing.
+        // A save changed the working tree; refresh the (shown) diff / blame. The
+        // gutter strip is refreshed by the view via `.refreshGutter` (it reacts to
+        // the post-save buffer settling), keeping the strip view-owned.
         return .merge(
           Self.markDirty(&state, dirty: false),
-          diffRefreshEffectIfShown(state: state)
+          diffRefreshEffectIfShown(state: state),
+          blameRefreshEffectIfShown(state: state)
         )
 
       case .saveFailed(let message):
@@ -289,12 +338,15 @@ struct EditorFeature {
           return .none
         }
         // Clean buffer: safe to silently reload to the on-disk contents. The
-        // working tree changed, so refresh the diff if it's showing.
+        // working tree changed, so refresh the (shown) diff / blame. The gutter
+        // strip is refreshed by the view via `.refreshGutter` (it reacts to the
+        // reloaded buffer).
         state.text = diskText
         state.loadError = nil
         return .merge(
           Self.markDirty(&state, dirty: false),
-          diffRefreshEffectIfShown(state: state)
+          diffRefreshEffectIfShown(state: state),
+          blameRefreshEffectIfShown(state: state)
         )
 
       case .reloadFromDisk:
@@ -363,6 +415,50 @@ struct EditorFeature {
         state.isDiffLoading = false
         return .none
 
+      case .refreshGutter:
+        guard let url = state.fileURL else {
+          state.gutterStatus = [:]
+          return .none
+        }
+        return gutterEffect(url: url, editorID: state.id)
+
+      case .gutterDiffLoaded(let diff):
+        // Derive the per-line change kinds from the working-tree-vs-HEAD diff.
+        // A `nil` diff (no changes / untracked / not-a-repo) clears the strip.
+        state.gutterStatus = diff.map(EditorGutterStatus.lineStatuses(for:)) ?? [:]
+        return .none
+
+      case .toggleBlame:
+        state.showingBlame.toggle()
+        guard state.showingBlame else {
+          // Turning blame off: clear the state and cancel any in-flight load.
+          state.blame = nil
+          state.isBlameLoading = false
+          return .cancel(id: CancelID.blame(state.id))
+        }
+        // Turning it on: load (or reload) blame. No file → nothing to blame.
+        guard let url = state.fileURL else {
+          state.blame = nil
+          state.isBlameLoading = false
+          return .none
+        }
+        state.isBlameLoading = true
+        return blameEffect(url: url, editorID: state.id)
+
+      case .refreshBlame:
+        // Re-run only while blame is actually showing and we have a file.
+        guard state.showingBlame, let url = state.fileURL else { return .none }
+        state.isBlameLoading = true
+        return blameEffect(url: url, editorID: state.id)
+
+      case .blameLoaded(let blame):
+        // A stale completion (the user toggled blame off mid-flight) must not
+        // resurrect the bar.
+        guard state.showingBlame else { return .none }
+        state.blame = blame
+        state.isBlameLoading = false
+        return .none
+
       case .delegate:
         return .none
       }
@@ -425,6 +521,40 @@ struct EditorFeature {
   private func diffRefreshEffectIfShown(state: State) -> Effect<Action> {
     guard state.showingDiff, let url = state.fileURL else { return .none }
     return diffEffect(url: url, editorID: state.id)
+  }
+
+  /// Compute the working-tree-vs-HEAD diff for the gutter strip off the main
+  /// actor and feed it back as `.gutterDiffLoaded`, where the reducer derives the
+  /// per-line change kinds. Cancellable + cancel-in-flight keyed on the editor id.
+  /// Reuses `fileDiffClient` — the gutter and the diff panel are two renderings of
+  /// the same underlying diff.
+  private func gutterEffect(url: URL, editorID: UUID) -> Effect<Action> {
+    let fileDiffClient = self.fileDiffClient
+    return .run { send in
+      let diff = await fileDiffClient.diff(url)
+      await send(.gutterDiffLoaded(diff))
+    }
+    .cancellable(id: CancelID.gutter(editorID), cancelInFlight: true)
+  }
+
+  /// Compute `git blame` for `url` off the main actor and feed it back as
+  /// `.blameLoaded`. Cancellable + cancel-in-flight keyed on the editor id so a
+  /// re-toggle / refresh supersedes an older computation.
+  private func blameEffect(url: URL, editorID: UUID) -> Effect<Action> {
+    let gitBlameClient = self.gitBlameClient
+    return .run { send in
+      let blame = await gitBlameClient.blame(url)
+      await send(.blameLoaded(blame))
+    }
+    .cancellable(id: CancelID.blame(editorID), cancelInFlight: true)
+  }
+
+  /// Refresh blame only when the bar is currently showing and there's a file;
+  /// otherwise no-op. Used by the save / external-reload paths so the shown blame
+  /// tracks the latest working-tree state.
+  private func blameRefreshEffectIfShown(state: State) -> Effect<Action> {
+    guard state.showingBlame, let url = state.fileURL else { return .none }
+    return blameEffect(url: url, editorID: state.id)
   }
 
   /// Set `isDirty` and emit `delegate(.dirtyChanged)` only when it actually

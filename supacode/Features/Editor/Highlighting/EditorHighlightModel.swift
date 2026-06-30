@@ -32,6 +32,9 @@ final class EditorHighlightModel {
   /// The plugin handed to the STTextView; captures the live view for scrolling.
   let scrollPlugin = ScrollPlugin()
 
+  /// The plugin that installs + drives the git change-indicator strip (Phase 10).
+  let gutterStripPlugin = EditorGutterStripPlugin()
+
   @ObservationIgnored private let clock: any Clock<Duration>
   @ObservationIgnored private let debounce: Duration
   @ObservationIgnored private var styleTask: Task<Void, Never>?
@@ -102,6 +105,26 @@ final class EditorHighlightModel {
   /// The selection binding handles selection; this guarantees the scroll.
   func reveal(_ symbol: EditorSymbol) {
     scrollPlugin.textView?.scrollRangeToVisible(symbol.range)
+  }
+
+  /// Push the latest git per-line change kinds to the gutter strip.
+  func updateGutter(status: [Int: EditorGutterChangeKind]) {
+    gutterStripPlugin.update(status: status)
+  }
+
+  /// The 1-based line number containing the start of `range` in `text`, or `nil`
+  /// when there's no selection. Used to drive the inline-blame bar from the
+  /// editor's current caret line. Counts `\n` up to the range's UTF-16 location.
+  static func lineNumber(forUTF16Offset offset: Int, in text: String) -> Int {
+    guard offset > 0 else { return 1 }
+    var line = 1
+    var seen = 0
+    for unit in text.utf16 {
+      if seen >= offset { break }
+      if unit == 0x0A { line += 1 }
+      seen += 1
+    }
+    return line
   }
 
   /// Scroll the underlying text view to the start of the given 1-based `line`

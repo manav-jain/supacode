@@ -24,11 +24,15 @@ struct EditorView: View {
       .onAppear {
         highlightModel.setFileURL(store.fileURL)
         highlightModel.scheduleHighlight(for: store.text)
+        highlightModel.updateGutter(status: store.gutterStatus)
         revealPendingLineIfReady()
+        // Compute the gutter strip for the file that's already loaded.
+        store.send(.refreshGutter)
       }
       .onChange(of: store.fileURL) { _, newValue in
         highlightModel.setFileURL(newValue)
         highlightModel.scheduleHighlight(for: store.text)
+        store.send(.refreshGutter)
       }
       .onChange(of: store.text) { _, newValue in
         highlightModel.scheduleHighlight(for: newValue)
@@ -44,7 +48,21 @@ struct EditorView: View {
       .onChange(of: store.isLoading) { _, isLoading in
         if !isLoading {
           revealPendingLineIfReady()
+          // The buffer just settled (load / reload finished) — recompute the
+          // gutter change strip against HEAD. Lazy, not per-keystroke.
+          store.send(.refreshGutter)
         }
+      }
+      .onChange(of: store.isDirty) { _, isDirty in
+        // A save landed (dirty → clean) without a reload: the working tree
+        // changed, so refresh the gutter strip. Guard on the transition so a
+        // keystroke flipping to dirty doesn't trigger a git probe.
+        if !isDirty {
+          store.send(.refreshGutter)
+        }
+      }
+      .onChange(of: store.gutterStatus) { _, status in
+        highlightModel.updateGutter(status: status)
       }
   }
 
@@ -65,12 +83,15 @@ struct EditorView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(.background)
-    // The diff toggle sits at the top-trailing corner whenever a file is bound,
-    // so it's available both to enter diff mode (from the editor) and to leave it
-    // (from the diff panel).
+    // The diff + blame toggles sit at the top-trailing corner whenever a file is
+    // bound, so they're available both from the editor and the diff panel.
     .overlay(alignment: .topTrailing) {
       if store.fileURL != nil, store.loadError == nil {
-        diffToggleButton
+        HStack(spacing: 6) {
+          blameToggleButton
+          diffToggleButton
+        }
+        .padding(8)
       }
     }
     // ⌘S — explicit save. Hidden command button so the shortcut is owned by the
@@ -103,8 +124,25 @@ struct EditorView: View {
     .buttonStyle(.bordered)
     .tint(store.showingDiff ? .accentColor : nil)
     .controlSize(.small)
-    .padding(8)
     .help(store.showingDiff ? "Hide changes (return to editing)" : "Show changes since HEAD")
+  }
+
+  /// Toolbar button that toggles inline git blame for the focused line. Tinted
+  /// while blame is showing. Hidden in diff mode (blame applies to the editable
+  /// buffer, not the diff panel).
+  @ViewBuilder private var blameToggleButton: some View {
+    if !store.showingDiff {
+      Button {
+        store.send(.toggleBlame)
+      } label: {
+        Label("Blame", systemImage: "person.text.rectangle")
+          .labelStyle(.iconOnly)
+      }
+      .buttonStyle(.bordered)
+      .tint(store.showingBlame ? .accentColor : nil)
+      .controlSize(.small)
+      .help(store.showingBlame ? "Hide git blame" : "Show git blame for the current line")
+    }
   }
 
   /// Scroll to `store.pendingScrollLine` once the buffer is loaded, then clear
@@ -128,7 +166,7 @@ struct EditorView: View {
         text: textBinding,
         selection: $selection,
         options: [.wrapLines, .highlightSelectedLine],
-        plugins: [highlightModel.scrollPlugin]
+        plugins: [highlightModel.scrollPlugin, highlightModel.gutterStripPlugin]
       )
       .textViewFont(highlightModel.font)
       .disabled(store.isLoading)
@@ -140,6 +178,67 @@ struct EditorView: View {
           externalChangeBanner
         }
       }
+      .safeAreaInset(edge: .bottom, spacing: 0) {
+        if store.showingBlame {
+          blameBar
+        }
+      }
+  }
+
+  /// Subtle bottom bar showing `git blame` for the line the caret is on. Dimmed /
+  /// secondary so it never competes with the code. Shows a loading state while
+  /// blame computes, a "no attribution" hint when the line isn't blameable, and
+  /// `commit · author · relative-date · summary` otherwise.
+  private var blameBar: some View {
+    HStack(spacing: 8) {
+      if store.isBlameLoading {
+        ProgressView()
+          .controlSize(.small)
+        Text("Loading blame…")
+          .foregroundStyle(.secondary)
+      } else if let line = currentBlameLine {
+        if line.isUncommitted {
+          Label("Not committed yet", systemImage: "pencil")
+            .foregroundStyle(.secondary)
+        } else {
+          Text(line.commit)
+            .monospaced()
+            .foregroundStyle(.secondary)
+          Text(line.author)
+            .foregroundStyle(.secondary)
+          if let date = line.timestamp {
+            Text(date, format: .relative(presentation: .named))
+              .foregroundStyle(.tertiary)
+          }
+          Text(line.summary)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        }
+      } else {
+        Text("No blame for this line")
+          .foregroundStyle(.tertiary)
+      }
+      Spacer(minLength: 0)
+    }
+    .font(.caption)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 6)
+    .background(.regularMaterial)
+    .overlay(alignment: .top) {
+      Divider()
+    }
+  }
+
+  /// The blame attribution for the line the caret is currently on, resolved from
+  /// the selection's UTF-16 offset against the buffer. `nil` when there's no
+  /// blame loaded or the line isn't attributed.
+  private var currentBlameLine: BlameLine? {
+    guard let blame = store.blame else { return nil }
+    let offset = selection?.location ?? 0
+    let line = EditorHighlightModel.lineNumber(forUTF16Offset: offset, in: store.text)
+    return blame.line(line)
   }
 
   /// Non-blocking banner shown when the open file changed on disk while the

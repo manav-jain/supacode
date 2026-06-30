@@ -483,4 +483,149 @@ struct EditorFeatureTests {
       $0.diff = refreshed
     }
   }
+
+  // MARK: - refreshGutter derives per-line change kinds from the diff.
+
+  @Test func refreshGutterDerivesLineStatuses() async {
+    let url = URL(filePath: "/tmp/gutter.swift")
+    let diff = FileDiff(hunks: [
+      DiffHunk(
+        id: 0,
+        header: "@@ -1,2 +1,3 @@",
+        oldStart: 1,
+        oldCount: 2,
+        newStart: 1,
+        newCount: 3,
+        lines: [
+          DiffLine(id: 0, kind: .context, text: "a", oldLineNumber: 1, newLineNumber: 1),
+          DiffLine(id: 1, kind: .removed, text: "b", oldLineNumber: 2, newLineNumber: nil),
+          DiffLine(id: 2, kind: .added, text: "b changed", oldLineNumber: nil, newLineNumber: 2),
+          DiffLine(id: 3, kind: .added, text: "c new", oldLineNumber: nil, newLineNumber: 3),
+        ]
+      )
+    ])
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID, fileURL: url, text: "a\nb\nc")) {
+      EditorFeature()
+    } withDependencies: {
+      $0.fileDiffClient.diff = { _ in diff }
+    }
+
+    await store.send(.refreshGutter)
+    await store.receive(\.gutterDiffLoaded) {
+      // Line 2 is a replacement (modified), line 3 is a surplus addition (added).
+      $0.gutterStatus = [2: .modified, 3: .added]
+    }
+  }
+
+  // MARK: - refreshGutter with no file clears the gutter and loads nothing.
+
+  @Test func refreshGutterWithoutFileClears() async {
+    let store = TestStore(
+      initialState: EditorFeature.State(id: Self.fixedID, gutterStatus: [1: .added])
+    ) {
+      EditorFeature()
+    }
+    await store.send(.refreshGutter) {
+      $0.gutterStatus = [:]
+    }
+  }
+
+  // MARK: - A nil gutter diff clears the strip.
+
+  @Test func gutterDiffLoadedNilClearsStrip() async {
+    let url = URL(filePath: "/tmp/clean.swift")
+    let store = TestStore(
+      initialState: EditorFeature.State(id: Self.fixedID, fileURL: url, gutterStatus: [3: .modified])
+    ) {
+      EditorFeature()
+    } withDependencies: {
+      $0.fileDiffClient.diff = { _ in nil }
+    }
+
+    await store.send(.refreshGutter)
+    await store.receive(\.gutterDiffLoaded) {
+      $0.gutterStatus = [:]
+    }
+  }
+
+  // MARK: - Toggle blame on loads it; toggle off clears it.
+
+  @Test func toggleBlameOnLoadsThenOffClears() async {
+    let url = URL(filePath: "/tmp/blamed.swift")
+    let sampleBlame = FileBlame(lines: [
+      BlameLine(
+        lineNumber: 1,
+        commit: "abc12345",
+        author: "Alice",
+        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+        summary: "init"
+      )
+    ])
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID, fileURL: url, text: "x")) {
+      EditorFeature()
+    } withDependencies: {
+      $0.gitBlameClient.blame = { _ in sampleBlame }
+    }
+
+    await store.send(.toggleBlame) {
+      $0.showingBlame = true
+      $0.isBlameLoading = true
+    }
+    await store.receive(\.blameLoaded) {
+      $0.blame = sampleBlame
+      $0.isBlameLoading = false
+    }
+
+    await store.send(.toggleBlame) {
+      $0.showingBlame = false
+      $0.blame = nil
+    }
+  }
+
+  // MARK: - Toggle blame with no file is a pure flag flip (no load).
+
+  @Test func toggleBlameWithoutFileDoesNotLoad() async {
+    let store = TestStore(initialState: EditorFeature.State(id: Self.fixedID)) {
+      EditorFeature()
+    }
+    await store.send(.toggleBlame) {
+      $0.showingBlame = true
+    }
+    await store.send(.toggleBlame) {
+      $0.showingBlame = false
+    }
+  }
+
+  // MARK: - Saving while blame is shown refreshes it.
+
+  @Test func saveRefreshesShownBlame() async {
+    let url = URL(filePath: "/tmp/blame-refresh.swift")
+    let refreshed = FileBlame(lines: [
+      BlameLine(lineNumber: 1, commit: "def67890", author: "Bob", timestamp: nil, summary: "edit")
+    ])
+    let store = TestStore(
+      initialState: EditorFeature.State(
+        id: Self.fixedID,
+        fileURL: url,
+        text: "draft",
+        isDirty: true,
+        showingBlame: true
+      )
+    ) {
+      EditorFeature()
+    } withDependencies: {
+      $0.editorFileClient.write = { _, _ in }
+      $0.gitBlameClient.blame = { _ in refreshed }
+    }
+
+    await store.send(.save)
+    await store.receive(\.saved) {
+      $0.isDirty = false
+    }
+    await store.receive(\.delegate.dirtyChanged)
+    // The save path re-runs blame because it's showing.
+    await store.receive(\.blameLoaded) {
+      $0.blame = refreshed
+    }
+  }
 }
