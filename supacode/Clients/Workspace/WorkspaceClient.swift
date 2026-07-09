@@ -9,18 +9,31 @@ struct WorkspaceClient {
       _ worktree: Worktree,
       _ onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
     ) -> Void
+  /// Opens a single local file in the chosen editor. Falls back to the OS
+  /// default app when the action isn't a real installed editor.
+  var openFile:
+    @MainActor @Sendable (
+      _ action: OpenWorktreeAction,
+      _ fileURL: URL,
+      _ onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
+    ) -> Void
 }
 
 extension WorkspaceClient: DependencyKey {
-  static let liveValue = WorkspaceClient { action, worktree, onError in
-    if worktree.host != nil {
-      WorktreeOpener.performRemote(action: action, worktree: worktree, onError: onError)
-    } else {
-      WorktreeOpener.perform(action: action, worktree: worktree, onError: onError)
+  static let liveValue = WorkspaceClient(
+    open: { action, worktree, onError in
+      if worktree.host != nil {
+        WorktreeOpener.performRemote(action: action, worktree: worktree, onError: onError)
+      } else {
+        WorktreeOpener.perform(action: action, worktree: worktree, onError: onError)
+      }
+    },
+    openFile: { action, fileURL, onError in
+      WorktreeOpener.openFile(action: action, fileURL: fileURL, onError: onError)
     }
-  }
+  )
 
-  static let testValue = WorkspaceClient { _, _, _ in }
+  static let testValue = WorkspaceClient(open: { _, _, _ in }, openFile: { _, _, _ in })
 }
 
 extension DependencyValues {
@@ -86,6 +99,32 @@ enum WorktreeOpener {
         message: "No supported open behavior was available for this worktree."
       )
     )
+  }
+
+  // ponytail: v1 opens the file with no line/column targeting and never routes
+  // to an in-app supacode editor target — both are deliberate follow-ups.
+  /// Opens a single local file in the chosen editor. Only reroutes when the
+  /// action is a real, installed external editor app; otherwise falls back to
+  /// `NSWorkspace.open` (the OS default app) so a cmd+click never regresses to
+  /// "reveal in Finder" or a no-op.
+  static func openFile(
+    action: OpenWorktreeAction,
+    fileURL: URL,
+    onError: @escaping @MainActor @Sendable (OpenActionError) -> Void
+  ) {
+    guard action != .finder, action != .editor,
+      let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: action.bundleIdentifier)
+    else {
+      NSWorkspace.shared.open(fileURL)
+      return
+    }
+    NSWorkspace.shared.open([fileURL], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration()) {
+      _, error in
+      guard let error else { return }
+      Task { @MainActor in
+        onError(.openFailed(action, error))
+      }
+    }
   }
 
   /// The pre-launch outcome for a remote open: the process to run, or the error

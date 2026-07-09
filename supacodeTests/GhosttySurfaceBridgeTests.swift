@@ -86,6 +86,56 @@ struct GhosttySurfaceBridgeTests {
     }
   }
 
+  @Test func localFileURLResolvesRelativePathAgainstPWD() throws {
+    let dir = FileManager.default.temporaryDirectory
+      .appending(path: "supacode-open-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let file = dir.appending(path: "nested.txt")
+    try Data().write(to: file)
+
+    let resolved = GhosttySurfaceBridge.localFileURL(fromClicked: "nested.txt", pwd: dir.path)
+    #expect(resolved?.standardizedFileURL == file.standardizedFileURL)
+  }
+
+  @Test func localFileURLReturnsAbsolutePathThatExists() throws {
+    let file = FileManager.default.temporaryDirectory
+      .appending(path: "supacode-open-\(UUID().uuidString).txt")
+    try Data().write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+
+    let resolved = GhosttySurfaceBridge.localFileURL(fromClicked: file.path, pwd: nil)
+    #expect(resolved?.standardizedFileURL == file.standardizedFileURL)
+  }
+
+  @Test func localFileURLExpandsTildePath() throws {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let name = ".supacode-open-\(UUID().uuidString).txt"
+    let file = home.appending(path: name)
+    try Data().write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+
+    let resolved = GhosttySurfaceBridge.localFileURL(fromClicked: "~/\(name)", pwd: nil)
+    #expect(resolved?.standardizedFileURL == file.standardizedFileURL)
+  }
+
+  @Test func localFileURLRejectsHTTPScheme() {
+    #expect(GhosttySurfaceBridge.localFileURL(fromClicked: "http://example.com", pwd: "/tmp") == nil)
+  }
+
+  @Test func localFileURLReturnsNilForNonexistentRelativePath() {
+    let resolved = GhosttySurfaceBridge.localFileURL(
+      fromClicked: "does-not-exist-\(UUID().uuidString).txt",
+      pwd: FileManager.default.temporaryDirectory.path
+    )
+    #expect(resolved == nil)
+  }
+
+  @Test func localFileURLReturnsNilForRelativePathWithoutPWD() {
+    #expect(GhosttySurfaceBridge.localFileURL(fromClicked: "relative.txt", pwd: nil) == nil)
+    #expect(GhosttySurfaceBridge.localFileURL(fromClicked: "relative.txt", pwd: "") == nil)
+  }
+
   @Test func desktopNotificationEmitsCallback() {
     let bridge = GhosttySurfaceBridge()
     var received: (title: String, body: String)?

@@ -196,6 +196,9 @@ final class WorktreeTerminalState {
   /// active surface (selected tab) or worst-of-all (unselected tabs) so the
   /// stripe stays in lock-step with focus and OSC-9 progress mutations.
   var onTabProgressDisplayChanged: ((TerminalTabID, TerminalTabProgressDisplay?) -> Void)?
+  /// Fires when the user cmd+clicks a local file path in a surface. Manager
+  /// forwards into TCA so the file opens in the chosen editor.
+  var onOpenFileRequested: ((URL) -> Void)?
 
   init(
     runtime: GhosttyRuntime,
@@ -1549,6 +1552,11 @@ final class WorktreeTerminalState {
       guard let self, let view else { return false }
       guard self.isLiveSurface(view) else { return false }
       return self.createTab(inheritingFromSurfaceId: view.id) != nil
+    }
+    view.bridge.onOpenFile = { [weak self] url in
+      guard let self else { return false }
+      self.onOpenFileRequested?(url)
+      return true
     }
     view.bridge.onCloseTab = { [weak self, weak view] _ in
       guard let self, let view, self.isLiveSurface(view) else { return false }
