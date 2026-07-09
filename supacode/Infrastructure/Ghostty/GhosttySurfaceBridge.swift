@@ -54,6 +54,9 @@ final class GhosttySurfaceBridge {
   var onSplitAction: ((GhosttySplitAction) -> Bool)?
   var onCloseRequest: ((Bool) -> Void)?
   var onNewTab: (() -> Bool)?
+  /// Fired for a cmd+clicked LOCAL file so the app can route it to the user's
+  /// chosen editor. Returns `true` if handled (skip the default NSWorkspace open).
+  var onOpenFile: ((URL) -> Bool)?
   var onCloseTab: ((ghostty_action_close_tab_mode_e) -> Bool)?
   var onGotoTab: ((ghostty_action_goto_tab_e) -> Bool)?
   var onMoveTab: ((ghostty_action_move_tab_s) -> Bool)?
@@ -459,6 +462,11 @@ final class GhosttySurfaceBridge {
       state.openUrlKind = openUrl.kind
       let rawUrl = string(from: openUrl.url, length: openUrl.len)
       state.openUrl = rawUrl
+      if let fileURL = Self.localFileURL(fromClicked: rawUrl, pwd: state.pwd),
+        onOpenFile?(fileURL) == true
+      {
+        return true
+      }
       if let request = ghosttyOpenURLRequest(urlString: rawUrl, kind: openUrl.kind) {
         SupaLogger("GhosttySurfaceBridge").debug("OPEN_URL raw=\(rawUrl ?? "nil") resolved=\(request.url)")
         NSWorkspace.shared.open(request.url)
@@ -625,6 +633,34 @@ final class GhosttySurfaceBridge {
     default:
       return false
     }
+  }
+
+  /// Resolves a cmd+clicked terminal token to an existing LOCAL file URL, or
+  /// `nil` if it isn't one (non-file scheme, unresolvable relative path, or
+  /// nothing on disk). Relative paths resolve against `pwd` (the surface cwd).
+  static func localFileURL(fromClicked raw: String?, pwd: String?) -> URL? {
+    guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+      return nil
+    }
+    let path: String
+    if let candidate = URL(string: trimmed), let scheme = candidate.scheme {
+      // Any non-file scheme (http/https/mailto/…) is not a local file.
+      guard scheme == "file" else { return nil }
+      path = candidate.path
+    } else if trimmed.hasPrefix("/") {
+      path = trimmed
+    } else if trimmed.hasPrefix("~") {
+      path = NSString(string: trimmed).expandingTildeInPath
+    } else {
+      // Relative: needs a cwd to anchor against.
+      guard let pwd = pwd?.trimmingCharacters(in: .whitespacesAndNewlines), !pwd.isEmpty else {
+        return nil
+      }
+      path = URL(filePath: trimmed, relativeTo: URL(filePath: pwd, directoryHint: .isDirectory)).path
+    }
+    let url = URL(filePath: path).standardizedFileURL
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return url
   }
 
   private func string(from pointer: UnsafePointer<CChar>?) -> String? {

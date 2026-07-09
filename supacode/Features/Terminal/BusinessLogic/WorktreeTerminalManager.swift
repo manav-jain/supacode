@@ -532,6 +532,9 @@ final class WorktreeTerminalManager {
       self?.emitProjection(for: worktree.id)
       self?.markLayoutDirty(worktreeID: worktree.id)
     }
+    state.onOpenFileRequested = { [weak self] url in
+      self?.emit(.openFileRequested(worktreeID: worktree.id, fileURL: url))
+    }
     state.onTabClosed = { [weak self] in
       self?.emit(.tabClosed(worktreeID: worktree.id))
       self?.emitProjection(for: worktree.id)

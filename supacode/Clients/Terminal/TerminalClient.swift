@@ -74,6 +74,9 @@ struct TerminalClient {
       worktreeID: Worktree.ID, kind: BlockingScriptKind, exitCode: Int?, tabId: TerminalTabID?)
     case commandPaletteToggleRequested(worktreeID: Worktree.ID)
     case setupScriptConsumed(worktreeID: Worktree.ID)
+    /// A local file path was cmd+clicked in a surface. `AppFeature` opens it in
+    /// the chosen editor (falling back to the OS default app).
+    case openFileRequested(worktreeID: Worktree.ID, fileURL: URL)
     /// Per-worktree projection emitted when surfaces / task-running / unseen / notifications drift.
     /// Routed by the parent into the matching `SidebarItemFeature` via the row's id.
     case worktreeProjectionChanged(Worktree.ID, WorktreeRowProjection)

@@ -1374,6 +1374,26 @@ struct AppFeature {
       case .terminalEvent(.agentHookEventReceived(let event)):
         return .send(.agentPresence(.hookEventReceived(event)))
 
+      case .terminalEvent(.openFileRequested(let worktreeID, let fileURL)):
+        guard let worktree = state.repositories.worktree(for: worktreeID) else {
+          appLogger.warning("openFileRequested: worktree \(worktreeID) not found, ignoring.")
+          return .none
+        }
+        // A cmd+clicked path is a local file resolved against the surface cwd;
+        // remote worktrees never resolve one, so bail defensively.
+        guard worktree.host == nil, !worktree.isMissing else {
+          appLogger.info("openFileRequested: worktree \(worktreeID) is remote or missing, ignoring.")
+          return .none
+        }
+        // ponytail: opens the file itself with no line/column targeting and no
+        // in-app supacode editor target — both are deliberate v1 follow-ups.
+        let action = state.openActionSelection
+        return .run { send in
+          await workspaceClient.openFile(action, fileURL) { error in
+            send(.openWorktreeFailed(error))
+          }
+        }
+
       case .terminalEvent:
         return .none
       }
